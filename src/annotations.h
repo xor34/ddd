@@ -29,6 +29,19 @@ public:
   void comment_block(int block, std::string text);
   void set_label(const SsaValue &value, std::string label);
 
+  // Record that `value` is the same variable as `source` -- what a COPY
+  // means. Uses of `value` then display as `source`, which is the point:
+  // `EAX#1 = INT_ADD EBX#in 0x1` says what the code does, where
+  // `EAX#1 = INT_ADD EAX#0 0x1` makes you go and look up EAX#0.
+  //
+  // A definition is still printed under its own name, so the copy itself
+  // stays visible.
+  void set_alias(const SsaValue &value, const SsaValue &source);
+
+  // Follows the alias chain to the value that should be displayed. Returns
+  // `value` itself when it is not an alias.
+  const SsaValue &canonical(const SsaValue &value) const;
+
   const std::vector<std::string> &comments(const SsaOp &op) const;
   const std::vector<std::string> &block_comments(int block) const;
 
@@ -42,6 +55,7 @@ private:
   std::map<int, std::vector<std::string>> op_comments_;
   std::map<int, std::vector<std::string>> block_comments_;
   std::map<int, std::string> labels_;
+  std::map<int, const SsaValue *> aliases_;
 };
 
 } // namespace ddd

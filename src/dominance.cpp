@@ -13,10 +13,12 @@ std::vector<int> postorder_from(const Cfg &cfg, int entry) {
     return order;
 
   std::vector<bool> visited(cfg.size(), false);
+
   struct Frame {
     int block;
     size_t next_succ;
   };
+
   std::vector<Frame> stack{{entry, 0}};
   visited[entry] = true;
 

@@ -9,8 +9,10 @@
 // map that was live at the top of each block.
 #pragma once
 
+#include "pass.h"
 #include "ssa.h"
 
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -27,9 +29,28 @@ public:
   // The value of `storage` at the top of `block`.
   SsaValue *at_entry(int block, const Storage &storage) const;
 
+  // The value of `storage` after everything in `block` has run.
+  SsaValue *at_exit(int block, const Storage &storage) const;
+
 private:
   const SsaFunction &fn_;
   std::vector<std::unordered_map<Storage, SsaValue *, StorageHash>> entry_;
 };
+
+// Ids of the values something outside this function can see. Two sources,
+// and the calling convention is the only thing that knows either:
+//
+//   * what the caller reads after we return -- the result register, the stack
+//     pointer, the callee-saved registers
+//   * what a callee reads when we call it -- the argument registers, which a
+//     p-code CALL does not mention at all
+//
+// This is the part SSA cannot work out on its own: inside the function these
+// values look unused. Dead-code elimination and expression folding both need
+// it, for the same reason -- neither the function's own output nor the
+// arguments it sets up must be mistaken for something nobody wanted.
+//
+// Empty when there is no calling convention to ask.
+std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx);
 
 } // namespace ddd

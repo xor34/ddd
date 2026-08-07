@@ -47,6 +47,7 @@ public:
     ReachingValues reaching(fn);
 
     annotate_parameters(fn, ctx, argument_registers);
+    annotate_return_address(fn, ctx);
     int calls = annotate_calls(fn, ctx, reaching, argument_registers);
 
     if (ctx.verbose)
@@ -72,6 +73,31 @@ private:
       return;
     ctx.annotations->comment_block(
         fn.cfg().entry, "parameters (" + ctx.abi()->name + "): " + os.str());
+  }
+
+  // Where the return address lives on entry. On a link-register architecture
+  // it is a live-in value worth naming; on a push-style one it is a stack
+  // slot, which stack-vars names instead.
+  static void annotate_return_address(SsaFunction &fn, const PassContext &ctx) {
+    const CallingConvention &abi = *ctx.abi();
+
+    if (abi.return_address_on_stack) {
+      ctx.annotations->comment_block(
+          fn.cfg().entry, "return address: pushed by the call, at the entry sp");
+      return;
+    }
+    if (abi.return_address_register.empty()) return;
+
+    const Storage storage = register_storage(*ctx.translator(), abi.return_address_register);
+    if (storage.space == nullptr) return;
+
+    ctx.annotations->comment_block(
+        fn.cfg().entry, "return address: " + abi.return_address_register);
+
+    // The incoming value of that register *is* the return address, so say so
+    // wherever it is used -- typically the RETURN itself.
+    const SsaValue *live_in = find_live_in(fn, storage);
+    if (live_in != nullptr) ctx.annotations->set_label(*live_in, "retaddr");
   }
 
   static int annotate_calls(SsaFunction &fn, const PassContext &ctx,

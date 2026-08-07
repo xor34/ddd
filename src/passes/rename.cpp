@@ -24,6 +24,7 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
+    int aliased = alias_copies(fn, *ctx.annotations);
     int named = 0;
 
     // Names flow forward along def-use edges, so repeat until it settles. The
@@ -47,16 +48,50 @@ public:
     named += name_conditions(fn, *ctx.annotations);
 
     if (ctx.verbose)
-      ctx.stream() << "  named " << named << " value(s)\n";
+      ctx.stream() << "  named " << named << " value(s), followed " << aliased
+                   << " copy/copies\n";
   }
 
 private:
-  static std::string derive(const SsaOp &op, const Annotations &annotations) {
-    // A copy is the same variable under another name.
-    if (op.opc == ghidra::CPUI_COPY && op.ins.size() == 1 &&
-        op.ins[0].is_tracked())
-      return annotations.label(*op.ins[0].value);
+  // A COPY produces the same variable under a new SSA name, so every use of
+  // the result is really a use of the source.
+  //
+  // This is the one rule here that needs no other pass to have invented a
+  // name first -- it comes straight out of the SSA graph. Without it `rename`
+  // could only relay labels that stack-vars had already set, so a function
+  // with no stack slots got nothing at all out of it.
+  static int alias_copies(SsaFunction &fn, Annotations &annotations) {
+    int aliased = 0;
 
+    fn.for_each_op([&](SsaOp &op) {
+      if (op.opc != ghidra::CPUI_COPY || op.ins.size() != 1)
+        return;
+      if (op.out == nullptr || !op.ins[0].is_tracked())
+        return;
+
+      // Only when the copy preserves width. A COPY between different sizes is
+      // a truncation or an extension, and calling the result the same
+      // variable would be a lie.
+      if (op.out->storage.size != op.ins[0].value->storage.size)
+        return;
+
+      // Never trade a register for a Sleigh temporary. Following a copy is
+      // supposed to make the listing easier to read, and `unique:0x23700:8#0`
+      // is not an improvement on `x0#1` -- the temporaries are lowering
+      // plumbing, not variables anyone wants to see. The other direction,
+      // naming a temporary after the register it came from, is exactly what
+      // this is for.
+      if (is_temporary(op.ins[0].value->storage) && !is_temporary(op.out->storage))
+        return;
+
+      annotations.set_alias(*op.out, *op.ins[0].value);
+      ++aliased;
+    });
+
+    return aliased;
+  }
+
+  static std::string derive(const SsaOp &op, const Annotations &annotations) {
     // Loading through a named address gives you that variable's contents.
     if (op.opc == ghidra::CPUI_LOAD && op.ins.size() >= 2 &&
         op.ins[1].is_tracked()) {

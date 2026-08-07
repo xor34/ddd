@@ -1,0 +1,32 @@
+# Where the return address lives is a property of the calling convention, and
+# architectures split two ways: a link register, or pushed on the stack by the
+# call instruction. Without that in the ABI, the stack slot an x86 RET pops is
+# indistinguishable from an incoming argument -- and was being reported as
+# `arg_0`.
+#
+# AArch64 keeps it in x30, so it is a live-in value worth naming.
+#
+#   mov x0, x1 ; ret
+#
+# RUN: %sleigh-poc --sla=%specs/AARCH64.sla --base=0x1000 --bytes=e00301aac0035fd6 \
+# RUN:   --passes=dce,calling-conv,rename,print-ssa | FileCheck --check-prefix=ARM %s
+
+# ARM: ; return address: x30
+# The incoming link register is named, so the RETURN says what it returns to.
+# ARM: RETURN retaddr#in
+# ARM-NOT: arg_0
+
+
+# x86-64 pushes it, so it is a stack slot -- and stack-vars must not call it an
+# argument.
+#
+#   mov eax, ebx ; add eax, 1 ; mov ebx, eax ; ret
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=89d883c00189c3c3 \
+# RUN:   --passes=dce,stack-vars,calling-conv,rename,print-ssa | FileCheck --check-prefix=X86 %s
+
+# X86: ; frame: retaddr[8]
+# X86: ; return address: pushed by the call, at the entry sp
+# X86: RIP#0 = LOAD ram RSP#in
+# X86-SAME: ; load retaddr [sp]
+# X86-NOT: arg_0

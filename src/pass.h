@@ -44,7 +44,12 @@ struct PassContext {
 
   // Display names. With a translator these come out as real register names
   // ("RAX#3") instead of raw storage ("register:0x0:8#3").
+  //
+  // name_of() follows aliases, so a use shows the variable it really is.
+  // declaration_of() does not, so the line that defines a value still names
+  // it -- otherwise a copy would print as `x = COPY x`.
   std::string name_of(const SsaValue &value) const;
+  std::string declaration_of(const SsaValue &value) const;
   std::string name_of(const VarnodeData &vn) const;
   std::string name_of(const SsaOperand &operand) const;
   // Operand by position, so the address-space constant of a LOAD/STORE comes

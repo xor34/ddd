@@ -88,7 +88,7 @@ private:
                        const SsaOp &op) {
     os << "      ";
     if (op.out != nullptr) {
-      os << ctx.name_of(*op.out) << " = ";
+      os << ctx.declaration_of(*op.out) << " = ";
     } else if (op.has_raw_output) {
       os << ctx.name_of(op.raw_output) << " = ";
     }

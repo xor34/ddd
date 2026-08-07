@@ -72,10 +72,12 @@ ABSL_FLAG(bool, cfg, false, "Print the raw p-code CFG before lifting");
 ABSL_FLAG(bool, list_passes, false,
           "List the registered passes and extractors, then exit");
 ABSL_FLAG(std::vector<std::string>, passes,
-          std::vector<std::string>({"prune-phis", "stack-vars", "idioms",
+          std::vector<std::string>({"prune-phis", "dce", "stack-vars", "idioms",
                                     "data-refs", "rename", "calling-conv",
-                                    "print-ssa"}),
-          "Passes to run over each region. py:<path> runs an external script.");
+                                    "hil"}),
+          "Passes to run over each region. Ends in `hil` for the readable "
+          "expression form; swap it for `print-ssa` to see one line per p-code "
+          "op. py:<path> runs an external script.");
 
 namespace {
 

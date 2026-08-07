@@ -94,8 +94,21 @@ inline bool is_temporary(const VarnodeData &vn) {
   return vn.space != nullptr && vn.space->getType() == ghidra::IPTR_INTERNAL;
 }
 
+inline bool is_temporary(const Storage &storage) {
+  return storage.space != nullptr &&
+         storage.space->getType() == ghidra::IPTR_INTERNAL;
+}
+
 // Does this op end a basic block?
 bool is_terminator(OpCode opc);
+
+// Does this op do something beyond producing its output?
+//
+// Only these may not be deleted when nobody reads their result. LOAD is on
+// the list deliberately: this tool is pointed at firmware, where a load can
+// be a device register read whose *occurrence* is the point, and silently
+// dropping one would be misleading in exactly the situation it is for.
+bool has_side_effects(OpCode opc);
 
 std::string to_string(const VarnodeData &vn);
 std::string to_string(const Storage &s);

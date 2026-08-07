@@ -1,6 +1,87 @@
 #include "reaching.h"
 
+#include "opcodes.hh"
+
 namespace ddd {
+namespace {
+
+std::vector<Storage> observable_storage(const PassContext &ctx) {
+  std::vector<Storage> result;
+  if (ctx.abi() == nullptr || ctx.translator() == nullptr)
+    return result;
+
+  auto add = [&](const std::string &name) {
+    if (name.empty())
+      return;
+    Storage storage = register_storage(*ctx.translator(), name);
+    if (storage.space != nullptr)
+      result.push_back(storage);
+  };
+
+  add(ctx.abi()->result);
+  add(ctx.abi()->stack_pointer);
+  for (const std::string &name : ctx.abi()->preserved)
+    add(name);
+
+  return result;
+}
+
+} // namespace
+
+std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx) {
+  std::set<int> roots;
+
+  const std::vector<Storage> storages = observable_storage(ctx);
+  if (storages.empty())
+    return roots;
+
+  ReachingValues reaching(fn);
+
+  // What a callee will read. A p-code CALL carries only its destination, so
+  // without this the argument setup looks dead and gets deleted -- taking the
+  // call's arguments with it.
+  //
+  // Every argument register is included, not a guessed-at prefix: a live-in
+  // has no defining op, so naming it a root keeps nothing alive, and anything
+  // the function actually wrote there was plausibly written for the call.
+  if (ctx.abi() != nullptr && ctx.translator() != nullptr) {
+    std::vector<Storage> arguments;
+    for (const std::string &name : ctx.abi()->arguments) {
+      Storage storage = register_storage(*ctx.translator(), name);
+      if (storage.space != nullptr)
+        arguments.push_back(storage);
+    }
+
+    fn.for_each_op([&](const SsaOp &op) {
+      if (op.opc != ghidra::CPUI_CALL && op.opc != ghidra::CPUI_CALLIND)
+        return;
+      for (const Storage &storage : arguments) {
+        SsaValue *value = reaching.before(op, storage);
+        if (value != nullptr)
+          roots.insert(value->id);
+      }
+    });
+  }
+
+  for (const SsaBlock &block : fn.blocks()) {
+    // Anything that hands control back: an explicit return, or a block with
+    // nowhere to go -- a fragment running off the end, or a tail call that
+    // could not be resolved.
+    const BasicBlock &raw = fn.cfg()[block.id];
+    if (!raw.ends_in_return && !raw.succs.empty())
+      continue;
+    if (!fn.dominance().reachable(block.id))
+      continue;
+
+    for (const Storage &storage : storages) {
+      SsaValue *value = reaching.at_exit(block.id, storage);
+      if (value != nullptr)
+        roots.insert(value->id);
+    }
+  }
+
+  return roots;
+}
 
 ReachingValues::ReachingValues(const SsaFunction &fn) : fn_(fn) {
   entry_.resize(fn.size());
@@ -38,6 +119,19 @@ ReachingValues::ReachingValues(const SsaFunction &fn) : fn_(fn) {
       stack.push_back(child);
     }
   }
+}
+
+SsaValue *ReachingValues::at_exit(int block, const Storage &storage) const {
+  SsaValue *value = at_entry(block, storage);
+
+  for (const SsaOp *phi : fn_[block].phis)
+    if (phi->out != nullptr && phi->out->storage == storage)
+      value = phi->out;
+  for (const SsaOp *op : fn_[block].ops)
+    if (op->out != nullptr && op->out->storage == storage)
+      value = op->out;
+
+  return value;
 }
 
 SsaValue *ReachingValues::at_entry(int block, const Storage &storage) const {

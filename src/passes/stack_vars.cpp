@@ -58,21 +58,33 @@ StackValue evaluate(const SsaOp &op, const StackValue &a, const StackValue &b) {
   case ghidra::CPUI_INT_SEXT:
     return a;
 
-  case ghidra::CPUI_INT_ADD:
-    if (a_frame && b_num)
+  case ghidra::CPUI_INT_ADD: {
+    if (a_frame && b_num) {
       return StackValue::frame(a.value + b.value);
-    if (a_num && b_frame)
-      return StackValue::frame(a.value + b.value);
-    if (a_num && b_num)
-      return StackValue::number(a.value + b.value);
-    return StackValue::bottom();
+    }
 
-  case ghidra::CPUI_INT_SUB:
-    if (a_frame && b_num)
-      return StackValue::frame(a.value - b.value);
-    if (a_num && b_num)
-      return StackValue::number(a.value - b.value);
+    if (a_num && b_frame) {
+      return StackValue::frame(a.value + b.value);
+    }
+
+    if (a_num && b_num) {
+      return StackValue::number(a.value + b.value);
+    }
+
     return StackValue::bottom();
+  }
+
+  case ghidra::CPUI_INT_SUB: {
+    if (a_frame && b_num) {
+      return StackValue::frame(a.value - b.value);
+    }
+
+    if (a_num && b_num) {
+      return StackValue::number(a.value - b.value);
+    }
+
+    return StackValue::bottom();
+  }
 
   default:
     return StackValue::bottom();
@@ -120,7 +132,15 @@ SparseAnalysis<StackValue> build_analysis(const Storage &stack_pointer) {
   return analysis;
 }
 
-std::string slot_name(int64_t offset) {
+// Below the entry stack pointer is the function's own frame; at or above it
+// is whatever the caller left there. On a push-style architecture one of
+// those slots is not an argument at all -- it is the return address the call
+// instruction pushed, and the convention is the only thing that knows.
+std::string slot_name(int64_t offset, const CallingConvention *abi) {
+  if (abi != nullptr && abi->return_address_on_stack &&
+      offset == abi->return_address_offset)
+    return "retaddr";
+
   std::ostringstream os;
   if (offset < 0) {
     os << "var_" << std::hex << -offset;
@@ -154,8 +174,8 @@ public:
       return;
     }
 
-    SparseResult<StackValue> result =
-        solve(fn, build_analysis(ctx.stack_pointer()));
+    const Storage stack_pointer = ctx.stack_pointer();
+    SparseResult<StackValue> result = solve(fn, build_analysis(stack_pointer));
 
     // offset -> widest access seen there
     std::map<int64_t, unsigned> slots;
@@ -180,8 +200,12 @@ public:
       unsigned &recorded = slots[address.value];
       recorded = std::max(recorded, width);
 
-      const std::string name = slot_name(address.value);
-      ctx.annotations->set_label(*op.ins[1].value, "&" + name);
+      const std::string name = slot_name(address.value, ctx.abi());
+      // Label the address only when it is a computed pointer. At offset 0 the
+      // address *is* the stack pointer, and calling that "&arg_0" would throw
+      // away the more useful name it already has.
+      if (op.ins[1].value->storage != stack_pointer)
+        ctx.annotations->set_label(*op.ins[1].value, "&" + name);
       ctx.annotations->comment(op, (load ? "load " : "store ") + name + " [" +
                                        frame_expression(address.value) + "]");
     });
@@ -214,7 +238,8 @@ private:
     std::ostringstream layout;
     layout << "frame:";
     for (const auto &slot : slots) {
-      layout << " " << slot_name(slot.first) << "[" << slot.second << "]";
+      layout << " " << slot_name(slot.first, ctx.abi()) << "[" << slot.second
+             << "]";
     }
     ctx.annotations->comment_block(fn.cfg().entry, layout.str());
 

@@ -22,6 +22,30 @@ void Annotations::set_label(const SsaValue &value, std::string label) {
   labels_[value.id] = std::move(label);
 }
 
+void Annotations::set_alias(const SsaValue &value, const SsaValue &source) {
+  if (&value == &source) return;
+  aliases_[value.id] = &source;
+}
+
+const SsaValue &Annotations::canonical(const SsaValue &value) const {
+  const SsaValue *current = &value;
+
+  // SSA copy chains cannot cycle -- a definition dominates its uses -- but
+  // the bound keeps a malformed function from hanging the printer.
+  for (int guard = 0; guard < 64; ++guard) {
+    // A label beats an alias: something decided this value deserves a name of
+    // its own, and following the copy past it would throw that away. The
+    // branch condition named `cond` is where this shows.
+    if (!label(*current).empty()) break;
+
+    auto it = aliases_.find(current->id);
+    if (it == aliases_.end()) break;
+    current = it->second;
+  }
+
+  return *current;
+}
+
 const std::vector<std::string> &Annotations::comments(const SsaOp &op) const {
   auto it = op_comments_.find(op.id);
   return it == op_comments_.end() ? no_comments() : it->second;
@@ -42,6 +66,7 @@ void Annotations::clear() {
   op_comments_.clear();
   block_comments_.clear();
   labels_.clear();
+  aliases_.clear();
 }
 
 } // namespace ddd

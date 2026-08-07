@@ -40,6 +40,11 @@ std::ostream &PassContext::stream() const {
 }
 
 std::string PassContext::name_of(const SsaValue &value) const {
+  if (annotations == nullptr) return declaration_of(value);
+  return declaration_of(annotations->canonical(value));
+}
+
+std::string PassContext::declaration_of(const SsaValue &value) const {
   const std::string *label =
       annotations != nullptr ? &annotations->label(value) : nullptr;
   std::string base =

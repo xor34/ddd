@@ -18,6 +18,23 @@ bool is_terminator(OpCode opc) {
   }
 }
 
+bool has_side_effects(OpCode opc) {
+  switch (opc) {
+  case ghidra::CPUI_STORE:
+  case ghidra::CPUI_LOAD: // may be a device register read
+  case ghidra::CPUI_BRANCH:
+  case ghidra::CPUI_CBRANCH:
+  case ghidra::CPUI_BRANCHIND:
+  case ghidra::CPUI_CALL:
+  case ghidra::CPUI_CALLIND:
+  case ghidra::CPUI_CALLOTHER: // opaque userop
+  case ghidra::CPUI_RETURN:
+    return true;
+  default:
+    return false;
+  }
+}
+
 std::string to_string(const VarnodeData &vn) {
   if (vn.space == nullptr)
     return "<null>";

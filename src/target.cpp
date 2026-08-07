@@ -109,13 +109,18 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
                            const std::string &stack_pointer,
                            const std::vector<std::string> &context,
                            const std::string &name) {
-  Instance *instance = instance_for(spec, context);
+  // Only fall back to the spec's implied mode when the caller named none:
+  // an explicit context is the whole point of a mode switch and must win.
+  const std::vector<std::string> effective =
+      context.empty() ? default_context(spec) : context;
+
+  Instance *instance = instance_for(spec, effective);
   if (instance == nullptr)
     return nullptr;
 
   Target target;
   target.spec = spec;
-  target.context = context;
+  target.context = effective;
   target.translator = instance->sleigh.get();
 
   target.abi =
