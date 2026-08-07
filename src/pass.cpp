@@ -27,7 +27,9 @@ std::ostream &PassContext::stream() const {
 
 std::string PassContext::name_of(const SsaValue &value) const {
   std::string base =
-      storage_name(*this, value.storage.space, value.storage.offset, value.storage.size);
+      value.label.empty()
+          ? storage_name(*this, value.storage.space, value.storage.offset, value.storage.size)
+          : value.label;
   if (value.is_live_in()) return base + "#in";
   return base + "#" + std::to_string(value.version);
 }
@@ -46,6 +48,17 @@ std::string PassContext::name_of(const VarnodeData &vn) const {
 std::string PassContext::name_of(const SsaOperand &operand) const {
   if (operand.value != nullptr) return name_of(*operand.value);
   return name_of(operand.raw);
+}
+
+std::string PassContext::name_of(const SsaOp &op, size_t index) const {
+  const SsaOperand &operand = op.ins[index];
+
+  if (is_space_operand(op, index) && operand.is_constant()) {
+    AddrSpace *space = operand.raw.getSpaceFromConst();
+    if (space != nullptr) return space->getName();
+  }
+
+  return name_of(operand);
 }
 
 PassRegistry &PassRegistry::instance() {

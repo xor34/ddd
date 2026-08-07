@@ -6,6 +6,8 @@
 // --passes on the command line; nothing else in the tree needs to change.
 #pragma once
 
+#include "abi.h"
+#include "image.h"
 #include "ssa.h"
 
 #include <functional>
@@ -22,8 +24,11 @@ namespace ddd {
 
 // Everything a pass needs besides the function itself.
 struct PassContext {
-  ghidra::Sleigh *translator = nullptr; // resolves register names; may be null
-  std::ostream *out = nullptr;          // where passes report; defaults to stdout
+  ghidra::Sleigh *translator = nullptr;      // resolves register names; may be null
+  const Image *image = nullptr;              // the bytes, code and data; may be null
+  const CallingConvention *abi = nullptr;    // may be null
+  Storage stack_pointer;                     // zeroed if unknown
+  std::ostream *out = nullptr;               // where passes report; defaults to stdout
   bool verbose = false;
 
   std::ostream &stream() const;
@@ -33,6 +38,9 @@ struct PassContext {
   std::string name_of(const SsaValue &value) const;
   std::string name_of(const VarnodeData &vn) const;
   std::string name_of(const SsaOperand &operand) const;
+  // Operand by position, so the address-space constant of a LOAD/STORE comes
+  // out as a space name rather than an encoded pointer.
+  std::string name_of(const SsaOp &op, size_t index) const;
 };
 
 class Pass {

@@ -21,6 +21,7 @@
 #include "sleigh.hh"
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -28,23 +29,38 @@
 namespace ddd {
 namespace {
 
-struct Instruction {
+struct SweptInstruction {
   Address addr;
   ghidra::int4 length = 1;
   size_t first_op = 0;
   size_t op_count = 0;
 };
 
+// Keeps the disassembly text instead of printing it, so every lifted op can
+// be shown next to the instruction it came from.
+class TextAssembly final : public ghidra::AssemblyEmit {
+public:
+  std::string text;
+
+  void dump(const Address &, const std::string &mnemonic,
+            const std::string &body) override {
+    text = body.empty() ? mnemonic : mnemonic + " " + body;
+  }
+};
+
 // Everything the sweep learned, in one place, so the leader/block/edge steps
 // below stay readable.
 struct Sweep {
   std::vector<PcodeOp> ops;
-  std::vector<Instruction> instructions;
+  std::vector<SweptInstruction> instructions;
   std::vector<size_t> op_to_instruction;
   // Instruction start offset -> index of its first op. An instruction that
   // lowered to no p-code at all (x86 NOP, for instance) maps to the next
   // instruction's first op, which is exactly where control resumes.
   std::unordered_map<uint64_t, size_t> offset_to_op;
+  // Disassembly text, kept alongside the p-code so the two can be shown
+  // together.
+  std::map<uint64_t, Instruction> decoded;
 };
 
 Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
@@ -56,23 +72,27 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
     if (!limits.end.isInvalid() && !(addr < limits.end)) break;
 
     PcodeCapture capture;
+    TextAssembly text;
     ghidra::int4 length = 1;
     try {
+      if (limits.disassemble) translator.printAssembly(text, addr);
       length = translator.oneInstruction(capture, addr);
     } catch (ghidra::LowlevelError &) {
       // Undecodable byte: skip it, contribute no p-code.
       length = 1;
       capture.ops.clear();
+      text.text = "(bad)";
     }
     if (length <= 0) length = 1;
 
-    Instruction instr;
+    SweptInstruction instr;
     instr.addr = addr;
     instr.length = length;
     instr.first_op = sweep.ops.size();
     instr.op_count = capture.ops.size();
 
     sweep.offset_to_op[addr.getOffset()] = instr.first_op;
+    sweep.decoded[addr.getOffset()] = Instruction{addr, length, std::move(text.text)};
     sweep.instructions.push_back(instr);
 
     for (PcodeOp &op : capture.ops) sweep.ops.push_back(std::move(op));
@@ -95,7 +115,7 @@ long long resolve_target(const Sweep &sweep, size_t op_index,
   if (is_constant(dest)) {
     // p-code-relative: signed offset from this op's index within its own
     // instruction's op list.
-    const Instruction &instr = sweep.instructions[sweep.op_to_instruction[op_index]];
+    const SweptInstruction &instr = sweep.instructions[sweep.op_to_instruction[op_index]];
     long long local = static_cast<long long>(op_index - instr.first_op);
     long long target = local + static_cast<long long>(static_cast<int64_t>(dest.offset));
     if (target < 0 || static_cast<size_t>(target) >= instr.op_count) return -1;
@@ -128,6 +148,11 @@ std::vector<size_t> find_leaders(const Sweep &sweep) {
 }
 
 } // namespace
+
+const Instruction *Cfg::instruction_at(const Address &addr) const {
+  auto it = instructions.find(static_cast<uint64_t>(addr.getOffset()));
+  return it == instructions.end() ? nullptr : &it->second;
+}
 
 void Cfg::refresh_preds() {
   for (BasicBlock &b : blocks) b.preds.clear();
@@ -162,7 +187,7 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
     BasicBlock block;
     block.id = cfg.size();
     block.start = sweep.ops[begin].addr;
-    const Instruction &last = sweep.instructions[sweep.op_to_instruction[end - 1]];
+    const SweptInstruction &last = sweep.instructions[sweep.op_to_instruction[end - 1]];
     block.end = last.addr + last.length;
     block.ops.assign(sweep.ops.begin() + begin, sweep.ops.begin() + end);
 
@@ -171,6 +196,12 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
   }
   if (cfg.empty()) return cfg;
   cfg.entry = 0;
+  cfg.instructions = std::move(sweep.decoded);
+  cfg.code_begin = static_cast<uint64_t>(start.getOffset());
+  cfg.code_end = cfg.instructions.empty()
+                     ? cfg.code_begin
+                     : cfg.instructions.rbegin()->first +
+                           cfg.instructions.rbegin()->second.length;
 
   for (size_t i = 0; i < ranges.size(); ++i) {
     BasicBlock &block = cfg.blocks[i];
@@ -240,8 +271,17 @@ std::string to_string(const Cfg &cfg) {
     if (block.ends_in_branch) os << " branch";
     os << "\n";
 
+    uint64_t shown = ~uint64_t(0);
     for (const PcodeOp &op : block.ops) {
-      os << "    ";
+      uint64_t at = static_cast<uint64_t>(op.addr.getOffset());
+      if (at != shown) {
+        shown = at;
+        const Instruction *instr = cfg.instruction_at(op.addr);
+        os << "  0x" << std::hex << at << std::dec << "  "
+           << (instr != nullptr ? instr->text : "") << "\n";
+      }
+
+      os << "      ";
       if (op.has_output) os << to_string(op.output) << " = ";
       os << ghidra::get_opname(op.opc);
       for (const VarnodeData &in : op.inputs) os << ' ' << to_string(in);
