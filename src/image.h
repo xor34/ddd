@@ -52,6 +52,8 @@ public:
     code_begin_ = begin;
     code_end_ = end;
   }
+  uint64_t code_begin() const { return code_begin_; }
+  uint64_t code_end() const { return code_end_; }
   bool is_code(uint64_t addr) const { return addr >= code_begin_ && addr < code_end_; }
   bool is_data(uint64_t addr) const { return contains(addr) && !is_code(addr); }
 

@@ -16,7 +16,6 @@
 
 #include <deque>
 #include <functional>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -32,11 +31,6 @@ struct SsaValue {
   int block = -1;           // block containing the definition
   SsaOp *def = nullptr;     // null for a live-in (parameter / uninitialized read)
   std::vector<SsaOp *> uses;
-
-  // Display name set by a pass (see the `rename` and `stack-vars` passes).
-  // Replaces the storage part of the printed name; the #version suffix stays,
-  // so distinct values never collapse into the same text.
-  std::string label;
 
   bool is_live_in() const { return def == nullptr; }
   bool is_phi() const;      // defined below, once SsaOp is complete
@@ -122,17 +116,6 @@ public:
   // blocks. Call after a pass adds or removes ops.
   void rebuild_uses();
 
-  // ---- annotations -------------------------------------------------------
-  // Where every readability pass leaves its findings, and the only thing
-  // print-ssa has to know about to render them. Keeping them here rather than
-  // having each pass print its own report is what lets stack-vars, idioms,
-  // data-refs and calling-conv compose into one listing.
-  void annotate(const SsaOp &op, std::string comment);
-  void annotate_block(int block, std::string comment);
-
-  const std::vector<std::string> &comments(const SsaOp &op) const;
-  const std::vector<std::string> &block_comments(int block) const;
-
   // Visits phis then ops of every block, in block-id order.
   void for_each_op(const std::function<void(SsaOp &)> &fn);
   void for_each_op(const std::function<void(const SsaOp &)> &fn) const;
@@ -146,8 +129,6 @@ private:
   const Cfg *cfg_ = nullptr;
   Dominance dom_;
   std::vector<SsaBlock> blocks_;
-  std::map<int, std::vector<std::string>> op_comments_;
-  std::map<int, std::vector<std::string>> block_comments_;
   // Deques: ids are indices and references must stay valid as more are added.
   std::deque<SsaOp> ops_;
   std::deque<SsaValue> values_;

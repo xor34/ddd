@@ -1,0 +1,32 @@
+# A calling convention and an instruction set are not properties of a file.
+# The case that makes this unavoidable is firmware that switches CPU mode: the
+# same spec, the same bytes, decoded differently either side of the switch.
+#
+# Context is what selects the mode, so it is part of a region:
+#   BEGIN:END:SPEC[:ABI[:SP[:CTX]]]     CTX joined with '+'
+#
+# TargetSet keys its Sleigh instances on (spec, context), so these two share a
+# spec file but get their own decoder and their own stack pointer.
+#
+# The bytes are b8 34 12 00 00.
+#
+# RUN: %sleigh-poc --base=0 --bytes=b834120000 --specs=%specs \
+# RUN:   --region=0:5:x86:cdecl-x86:SP:addrsize=0+opsize=0 \
+# RUN:   --passes=print-ssa | FileCheck --check-prefix=REAL %s
+#
+# RUN: %sleigh-poc --base=0 --bytes=b834120000 --specs=%specs \
+# RUN:   --region=0:5:x86:cdecl-x86:ESP:addrsize=1+opsize=1 \
+# RUN:   --passes=print-ssa | FileCheck --check-prefix=PROT %s
+
+# 16-bit: a 3-byte immediate move, so the trailing zeros are a second
+# instruction.
+# REAL: === region 0x0-0x5  x86:addrsize=0 ===
+# REAL: 0x0 MOV AX,0x1234
+# REAL: AX#0 = COPY 0x1234
+# REAL: 0x3 ADD
+
+# 32-bit: the same five bytes are one instruction into a wider register.
+# PROT: === region 0x0-0x5  x86:addrsize=1 ===
+# PROT: 0x0 MOV EAX,0x1234
+# PROT: EAX#0 = COPY 0x1234
+# PROT-NOT: 0x3

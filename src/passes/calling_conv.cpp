@@ -28,14 +28,14 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
-    if (ctx.abi == nullptr || ctx.translator == nullptr) {
+    if (ctx.abi() == nullptr || ctx.translator() == nullptr) {
       if (ctx.verbose) ctx.stream() << "  no calling convention known, skipping\n";
       return;
     }
 
     std::vector<Storage> argument_registers;
-    for (const std::string &reg : ctx.abi->arguments) {
-      Storage storage = register_storage(*ctx.translator, reg);
+    for (const std::string &reg : ctx.abi()->arguments) {
+      Storage storage = register_storage(*ctx.translator(), reg);
       if (storage.space != nullptr) argument_registers.push_back(storage);
     }
     if (argument_registers.empty()) return;
@@ -59,11 +59,11 @@ private:
       const SsaValue *live_in = find_live_in(fn, registers[i]);
       if (live_in == nullptr || live_in->uses.empty()) break; // arguments run out here
 
-      os << (count++ == 0 ? "" : ", ") << ctx.abi->arguments[i];
+      os << (count++ == 0 ? "" : ", ") << ctx.abi()->arguments[i];
     }
 
     if (count == 0) return;
-    fn.annotate_block(fn.cfg().entry, "parameters (" + ctx.abi->name + "): " + os.str());
+    ctx.annotations->comment_block(fn.cfg().entry, "parameters (" + ctx.abi()->name + "): " + os.str());
   }
 
   static int annotate_calls(SsaFunction &fn, const PassContext &ctx,
@@ -87,14 +87,14 @@ private:
         // so a gap does not hide the arguments after it.
         if (value->is_live_in() && value->uses.empty()) continue;
 
-        os << (count++ == 0 ? "" : ", ") << ctx.abi->arguments[i] << "="
+        os << (count++ == 0 ? "" : ", ") << ctx.abi()->arguments[i] << "="
            << ctx.name_of(*value);
       }
 
-      fn.annotate(op, count == 0 ? "no arguments detected"
+      ctx.annotations->comment(op, count == 0 ? "no arguments detected"
                                  : "args: " + os.str());
-      if (!ctx.abi->result.empty())
-        fn.annotate(op, "returns in " + ctx.abi->result);
+      if (!ctx.abi()->result.empty())
+        ctx.annotations->comment(op, "returns in " + ctx.abi()->result);
     });
 
     return calls;

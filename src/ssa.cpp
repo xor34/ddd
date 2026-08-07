@@ -21,29 +21,8 @@ bool default_track_filter(const VarnodeData &vn) {
 }
 
 std::string SsaValue::name() const {
-  const std::string base = label.empty() ? to_string(storage) : label;
-  if (is_live_in()) return base + "#in";
-  return base + "#" + std::to_string(version);
-}
-
-void SsaFunction::annotate(const SsaOp &op, std::string comment) {
-  op_comments_[op.id].push_back(std::move(comment));
-}
-
-void SsaFunction::annotate_block(int block, std::string comment) {
-  block_comments_[block].push_back(std::move(comment));
-}
-
-const std::vector<std::string> &SsaFunction::comments(const SsaOp &op) const {
-  static const std::vector<std::string> none;
-  auto it = op_comments_.find(op.id);
-  return it == op_comments_.end() ? none : it->second;
-}
-
-const std::vector<std::string> &SsaFunction::block_comments(int block) const {
-  static const std::vector<std::string> none;
-  auto it = block_comments_.find(block);
-  return it == block_comments_.end() ? none : it->second;
+  if (is_live_in()) return to_string(storage) + "#in";
+  return to_string(storage) + "#" + std::to_string(version);
 }
 
 SsaOp &SsaFunction::new_op() {

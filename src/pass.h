@@ -7,8 +7,10 @@
 #pragma once
 
 #include "abi.h"
+#include "annotations.h"
 #include "image.h"
 #include "ssa.h"
+#include "target.h"
 
 #include <functional>
 #include <iosfwd>
@@ -23,13 +25,20 @@ class Sleigh;
 namespace ddd {
 
 // Everything a pass needs besides the function itself.
+//
+// `target` is the one for *this* function, not for the file: an image can
+// hold more than one instruction set, and one instruction set can be used
+// under more than one convention.
 struct PassContext {
-  ghidra::Sleigh *translator = nullptr;      // resolves register names; may be null
-  const Image *image = nullptr;              // the bytes, code and data; may be null
-  const CallingConvention *abi = nullptr;    // may be null
-  Storage stack_pointer;                     // zeroed if unknown
-  std::ostream *out = nullptr;               // where passes report; defaults to stdout
+  const Target *target = nullptr;      // ISA + ABI in force here; may be null
+  const Image *image = nullptr;        // the bytes, code and data; may be null
+  Annotations *annotations = nullptr;  // where passes record what they found
+  std::ostream *out = nullptr;         // where passes report; defaults to stdout
   bool verbose = false;
+
+  ghidra::Sleigh *translator() const;
+  const CallingConvention *abi() const;
+  Storage stack_pointer() const;
 
   std::ostream &stream() const;
 
@@ -87,10 +96,15 @@ struct PassRegistrar {
 #define DDD_REGISTER_PASS(Type)                                                \
   static const ::ddd::PassRegistrar<Type> ddd_registrar_##Type {}
 
+// A pass that shells out to an external script (see passes/script_pass.cpp).
+// Named by path at the point of use, so it is not in the registry.
+std::unique_ptr<Pass> make_script_pass(const std::string &path);
+
 // Runs a sequence of passes in order.
 class PassManager {
 public:
-  // Looks the pass up by name; returns false if there is no such pass.
+  // Looks the pass up by name, or builds a script pass for a "py:<path>"
+  // name. Returns false if there is no such pass.
   bool add(const std::string &name);
   void run(SsaFunction &fn, PassContext &ctx) const;
 

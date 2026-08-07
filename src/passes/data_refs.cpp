@@ -51,12 +51,16 @@ public:
 
       for (size_t i = 0; i < op.ins.size(); ++i) {
         const SsaOperand &in = op.ins[i];
-        if (!in.is_constant() || is_space_operand(op, i)) continue;
+        if (!in.is_constant()) continue;
+        // Some constant operands are not values at all: the address space of a
+        // LOAD/STORE, the userop index of a CALLOTHER.
+        if (is_space_operand(op, i)) continue;
+        if (op.opc == ghidra::CPUI_CALLOTHER && i == 0) continue;
 
         std::string described = describe(*ctx.image, in.constant());
         if (described.empty()) continue;
 
-        fn.annotate(op, described);
+        ctx.annotations->comment(op, described);
         ++resolved;
       }
     });
@@ -65,6 +69,17 @@ public:
   }
 
 private:
+  // A constant is only worth resolving if it points somewhere that is data.
+  //
+  // Reading a word always "succeeds" anywhere inside the image, so that on its
+  // own is no evidence at all -- with a base of 0 every small immediate would
+  // come back as a pointer. Two things separate a real reference:
+  //
+  //   * a NUL-terminated printable run is self-validating, and is reported
+  //     wherever it is found
+  //   * anything else has to point past the end of everything disassembled.
+  //     Small integers alias with the low addresses; the trailing data area
+  //     does not.
   static std::string describe(const Image &image, uint64_t address) {
     if (!image.is_data(address)) return {};
 
@@ -75,6 +90,8 @@ private:
       os << '"' << escape(*text) << '"';
       return os.str();
     }
+
+    if (address < image.code_end()) return {};
 
     if (std::optional<uint64_t> word = image.read_int(address, 8)) {
       os << "0x" << std::hex << *word << " (8 bytes)";

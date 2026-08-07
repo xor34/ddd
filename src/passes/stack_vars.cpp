@@ -135,12 +135,12 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
-    if (ctx.stack_pointer.space == nullptr) {
+    if (ctx.stack_pointer().space == nullptr) {
       if (ctx.verbose) ctx.stream() << "  no stack pointer known, skipping\n";
       return;
     }
 
-    SparseResult<StackValue> result = solve(fn, build_analysis(ctx.stack_pointer));
+    SparseResult<StackValue> result = solve(fn, build_analysis(ctx.stack_pointer()));
 
     // offset -> widest access seen there
     std::map<int64_t, unsigned> slots;
@@ -150,7 +150,7 @@ public:
       const bool load = op.opc == ghidra::CPUI_LOAD;
       const bool store = op.opc == ghidra::CPUI_STORE;
       if (!load && !store) {
-        label_frame_pointer(fn, op, result);
+        label_frame_pointer(ctx, op, result);
         return;
       }
       if (op.ins.size() < 2 || !op.ins[1].is_tracked()) return;
@@ -164,8 +164,8 @@ public:
       recorded = std::max(recorded, width);
 
       const std::string name = slot_name(address.value);
-      op.ins[1].value->label = "&" + name;
-      fn.annotate(op, (load ? "load " : "store ") + name + " [" +
+      ctx.annotations->set_label(*op.ins[1].value, "&" + name);
+      ctx.annotations->comment(op, (load ? "load " : "store ") + name + " [" +
                           frame_expression(address.value) + "]");
     });
 
@@ -175,17 +175,16 @@ public:
 private:
   // A value that is a pure frame offset but never dereferenced is still worth
   // naming -- that is what a frame pointer looks like.
-  static void label_frame_pointer(SsaFunction &fn, SsaOp &op,
+  static void label_frame_pointer(PassContext &ctx, SsaOp &op,
                                   const SparseResult<StackValue> &result) {
-    if (op.out == nullptr || !op.out->label.empty()) return;
+    if (op.out == nullptr || ctx.annotations->has_label(*op.out)) return;
 
     const StackValue &value = result[*op.out];
     if (value.state != StackValue::Frame) return;
-    op.out->label = frame_expression(value.value);
-    (void)fn;
+    ctx.annotations->set_label(*op.out, frame_expression(value.value));
   }
 
-  static void report(SsaFunction &fn, PassContext &ctx,
+  static void report(const SsaFunction &fn, PassContext &ctx,
                      const std::map<int64_t, unsigned> &slots) {
     if (slots.empty()) {
       if (ctx.verbose) ctx.stream() << "  no stack slots found\n";
@@ -197,7 +196,7 @@ private:
     for (const auto &slot : slots) {
       layout << " " << slot_name(slot.first) << "[" << slot.second << "]";
     }
-    fn.annotate_block(fn.cfg().entry, layout.str());
+    ctx.annotations->comment_block(fn.cfg().entry, layout.str());
 
     if (ctx.verbose)
       ctx.stream() << "  " << slots.size() << " stack slot(s)\n";

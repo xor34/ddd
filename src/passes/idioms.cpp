@@ -103,7 +103,7 @@ public:
         Match m;
         if (!rule.pattern.match(op, m)) continue;
 
-        fn.annotate(op, rule.describe(op, m, ctx));
+        ctx.annotations->comment(op, rule.describe(op, m, ctx));
         ++matched;
         break; // first rule wins; the table is ordered most-specific first
       }

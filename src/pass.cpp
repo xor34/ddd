@@ -12,8 +12,8 @@ namespace {
 std::string storage_name(const PassContext &ctx, AddrSpace *space, uint64_t offset,
                          uint32_t size) {
   if (space == nullptr) return "?";
-  if (ctx.translator != nullptr) {
-    std::string reg = ctx.translator->getRegisterName(space, offset, size);
+  if (ctx.translator() != nullptr) {
+    std::string reg = ctx.translator()->getRegisterName(space, offset, size);
     if (!reg.empty()) return reg;
   }
   return to_string(Storage{space, offset, size});
@@ -21,15 +21,28 @@ std::string storage_name(const PassContext &ctx, AddrSpace *space, uint64_t offs
 
 } // namespace
 
+ghidra::Sleigh *PassContext::translator() const {
+  return target != nullptr ? target->translator : nullptr;
+}
+
+const CallingConvention *PassContext::abi() const {
+  return target != nullptr ? target->abi : nullptr;
+}
+
+Storage PassContext::stack_pointer() const {
+  return target != nullptr ? target->stack_pointer : Storage{};
+}
+
 std::ostream &PassContext::stream() const {
   return out != nullptr ? *out : std::cout;
 }
 
 std::string PassContext::name_of(const SsaValue &value) const {
+  const std::string *label = annotations != nullptr ? &annotations->label(value) : nullptr;
   std::string base =
-      value.label.empty()
-          ? storage_name(*this, value.storage.space, value.storage.offset, value.storage.size)
-          : value.label;
+      (label != nullptr && !label->empty())
+          ? *label
+          : storage_name(*this, value.storage.space, value.storage.offset, value.storage.size);
   if (value.is_live_in()) return base + "#in";
   return base + "#" + std::to_string(value.version);
 }
@@ -75,6 +88,12 @@ std::unique_ptr<Pass> PassRegistry::create(const std::string &name) const {
 }
 
 bool PassManager::add(const std::string &name) {
+  // "py:<path>" runs an external script instead of a registered pass.
+  if (name.rfind("py:", 0) == 0) {
+    passes_.push_back(make_script_pass(name.substr(3)));
+    return true;
+  }
+
   std::unique_ptr<Pass> pass = PassRegistry::instance().create(name);
   if (pass == nullptr) return false;
   passes_.push_back(std::move(pass));

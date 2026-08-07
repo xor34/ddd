@@ -1,0 +1,22 @@
+# A transform rewrites the bytes before anything looks at them, which is what
+# an obfuscated or encrypted image needs. Everything downstream analyses the
+# result without knowing a transform happened.
+#
+# The bytes are `mov x0, #5 ; ret` XORed with 0x5a.
+#
+# RUN: %sleigh-poc --sla=%specs/AARCH64.sla --base=0 --bytes=fa5ada889a59058c \
+# RUN:   --passes=print-ssa | FileCheck --check-prefix=ENCRYPTED %s
+
+# RUN: %sleigh-poc --sla=%specs/AARCH64.sla --base=0 --bytes=fa5ada889a59058c \
+# RUN:   --transform=%S/xor.py --passes=print-ssa | FileCheck %s
+
+# Without the transform it decodes as something, just not anything real --
+# which is exactly why the disassembler cannot be trusted to notice.
+# ENCRYPTED-NOT: mov x0, #0x5
+
+# CHECK: transform
+# CHECK-SAME: 8 -> 8 bytes
+# CHECK: 0x0 mov x0, #0x5
+# CHECK: x0#0 = COPY 0x5
+# CHECK: 0x4 ret
+# CHECK: RETURN

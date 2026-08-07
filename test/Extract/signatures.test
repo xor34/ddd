@@ -1,0 +1,32 @@
+# Extractors answer "what is in this image" before anything can be lifted.
+# This one is a gzip header, then a string, then zero padding -- the shape of
+# a firmware blob, without needing a real one.
+#
+# RUN: %sleigh-poc --base=0 --extractors=signatures,strings --extract \
+# RUN:   --bytes=1f8b08000000000000036669726d776172652076312e3000000000000000000000 \
+# RUN:   | FileCheck %s
+
+# The magic scan reports where a format starts. It does not unpack it: carving
+# is a scan, unpacking is a transform.
+# CHECK: 0x0 gzip gzip stream
+
+# Short magics are reported with the confidence they deserve.
+# CHECK-SAME: (0.90)
+
+# CHECK: 0xa+0xd string "firmware v1.0"
+
+
+# arch-detect is the extractor that makes a foreign blob usable: it names a
+# spec, and that spec goes straight into --region. Restricted to a handful of
+# candidates here because it costs one Sleigh load each.
+#
+# RUN: %sleigh-poc --base=0 --extractors=arch-detect --extract --specs=%specs \
+# RUN:   --try_specs=AARCH64,mips32le,ppc_32_be \
+# RUN:   --bytes=ff8300d1e00700f9e10740f9410008918200001f00040054e30300aaff830091c0035fd6 \
+# RUN:   | FileCheck --check-prefix=ARCH %s
+
+# ARCH: arch-detect
+# ARCH: AARCH64:
+# ARCH-SAME: score 1
+# ARCH: 0x0+0x24 code
+# ARCH-SAME: [--region spec: AARCH64]

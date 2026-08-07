@@ -118,6 +118,7 @@ def main():
                 "%specs": f'"{args.specs}"',
                 "%lift": lift,
                 "%t": os.path.join(scratch, "t"),
+                "%S": f'"{os.path.dirname(path)}"',
                 "%s": f'"{path}"',
             }
 

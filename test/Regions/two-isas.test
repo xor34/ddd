@@ -1,0 +1,30 @@
+# One image, two instruction sets. Neither the ISA nor the calling convention
+# is a property of the file, so each region carries its own Target and is
+# lifted with it.
+#
+# The bytes are, in order:
+#   0x00  aarch64   mov x0, #5 ; ret
+#   0x08  mips32le  li v0, 7 ; jr ra ; nop
+#   0x14  data      "firmware v1.0\0"
+#
+# Note --region is one comma-separated flag, not a repeated one: absl vector
+# flags overwrite rather than accumulate.
+#
+# RUN: %sleigh-poc --base=0 \
+# RUN:   --bytes=a00080d2c0035fd6070002240800e003000000006669726d776172652076312e3000 \
+# RUN:   --region=0:8:AARCH64,8:0x14:mips32le \
+# RUN:   --specs=%specs --passes=print-ssa | FileCheck %s
+
+# CHECK: === region 0x0-0x8  AARCH64 ===
+# CHECK: 0x0 mov x0, #0x5
+# CHECK: x0#0 = COPY 0x5
+# CHECK: 0x4 ret
+
+# The same image, decoded by a different Sleigh, with its own register names.
+# CHECK: === region 0x8-0x14  mips32le ===
+# CHECK: 0x8 li v0, 0x7
+# CHECK: v0#0 = COPY 0x7
+# CHECK: 0xc jr ra
+
+# Both regions were lifted; neither leaked into the other.
+# CHECK-NOT: === region

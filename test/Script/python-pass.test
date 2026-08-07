@@ -1,0 +1,31 @@
+# A pass written in Python, run as py:<path>. It sees what the C++ passes
+# already concluded (labels, names) and writes back into the same annotation
+# table, so its comments interleave with theirs in one listing.
+#
+# The blob is:  sub sp,#0x20 / str x0,[sp,#8] / ldr x1,[sp,#8] / mul x3,x1,x1 /
+#               add sp,#0x20 / ret
+#
+# RUN: %sleigh-poc --sla=%specs/AARCH64.sla --base=0 \
+# RUN:   --bytes=ff8300d1e00700f9e10740f9237c019bff830091c0035fd6 \
+# RUN:   --passes=stack-vars,rename,py:%S/annotate.py,print-ssa | FileCheck %s
+
+# CHECK: applied 3 directive(s)
+
+# The block comment the script emitted, next to the one stack-vars emitted.
+# CHECK: block 0 (entry)
+# CHECK-DAG: ; frame: var_18[8]
+# CHECK-DAG: ; seen by python on AARCH64
+
+# The script labelled the multiply's result, and print-ssa renders it exactly
+# like a label set from C++ -- version suffix and all.
+# CHECK: product#0 = INT_MULT
+# CHECK-SAME: ; multiply, worth a look
+
+
+# A script that fails is reported, not fatal: the rest of the pipeline still
+# runs.
+# RUN: %sleigh-poc --sla=%specs/AARCH64.sla --base=0 --bytes=c0035fd6 \
+# RUN:   --passes=py:/nonexistent/script.py,print-ssa | FileCheck --check-prefix=MISSING %s
+
+# MISSING: /nonexistent/script.py: script exited with status
+# MISSING: RETURN

@@ -112,7 +112,8 @@ target("sleigh_poc")
     add_files(
         "src/*.cc",
         "src/*.cpp",
-        "src/passes/*.cpp"
+        "src/passes/*.cpp",
+        "src/extractors/*.cpp"
     )
 
     add_deps("sla")

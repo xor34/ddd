@@ -32,3 +32,5 @@ lift = '"%s" "%s" --sleigh-poc="%s" --specs="%s"' % (
 config.substitutions.append(("%sleigh-poc", '"%s"' % sleigh_poc))
 config.substitutions.append(("%specs", '"%s"' % specs))
 config.substitutions.append(("%lift", lift))
+# %S is the test's own directory, for tests that ship a helper script.
+config.substitutions.append(("%S", os.path.dirname("%s")))

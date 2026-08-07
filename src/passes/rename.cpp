@@ -29,42 +29,43 @@ public:
     for (bool changed = true; changed;) {
       changed = false;
       fn.for_each_op([&](SsaOp &op) {
-        if (op.out == nullptr || !op.out->label.empty()) return;
+        if (op.out == nullptr || ctx.annotations->has_label(*op.out)) return;
 
-        std::string label = derive(op);
+        std::string label = derive(op, *ctx.annotations);
         if (label.empty()) return;
 
-        op.out->label = std::move(label);
+        ctx.annotations->set_label(*op.out, std::move(label));
         ++named;
         changed = true;
       });
     }
 
-    named += name_conditions(fn);
+    named += name_conditions(fn, *ctx.annotations);
 
     if (ctx.verbose) ctx.stream() << "  named " << named << " value(s)\n";
   }
 
 private:
-  static std::string derive(const SsaOp &op) {
+  static std::string derive(const SsaOp &op, const Annotations &annotations) {
     // A copy is the same variable under another name.
     if (op.opc == ghidra::CPUI_COPY && op.ins.size() == 1 && op.ins[0].is_tracked())
-      return op.ins[0].value->label;
+      return annotations.label(*op.ins[0].value);
 
     // Loading through a named address gives you that variable's contents.
     if (op.opc == ghidra::CPUI_LOAD && op.ins.size() >= 2 && op.ins[1].is_tracked()) {
-      const std::string &address = op.ins[1].value->label;
+      const std::string &address = annotations.label(*op.ins[1].value);
       if (address.size() > 1 && address[0] == '&') return address.substr(1);
     }
 
     // A phi of values that all agree on a name keeps it.
     if (op.is_phi && !op.ins.empty()) {
       const SsaOperand &first = op.ins.front();
-      if (!first.is_tracked() || first.value->label.empty()) return {};
+      if (!first.is_tracked() || !annotations.has_label(*first.value)) return {};
 
+      const std::string &shared = annotations.label(*first.value);
       for (const SsaOperand &in : op.ins)
-        if (!in.is_tracked() || in.value->label != first.value->label) return {};
-      return first.value->label;
+        if (!in.is_tracked() || annotations.label(*in.value) != shared) return {};
+      return shared;
     }
 
     return {};
@@ -72,14 +73,14 @@ private:
 
   // The one-bit value a conditional branch tests is worth naming wherever it
   // came from.
-  static int name_conditions(SsaFunction &fn) {
+  static int name_conditions(SsaFunction &fn, Annotations &annotations) {
     int named = 0;
 
     fn.for_each_op([&](SsaOp &op) {
       if (op.opc != ghidra::CPUI_CBRANCH || op.ins.size() < 2) return;
-      if (!op.ins[1].is_tracked() || !op.ins[1].value->label.empty()) return;
+      if (!op.ins[1].is_tracked() || annotations.has_label(*op.ins[1].value)) return;
 
-      op.ins[1].value->label = "cond";
+      annotations.set_label(*op.ins[1].value, "cond");
       ++named;
     });
 
