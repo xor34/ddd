@@ -53,6 +53,15 @@ const CallingConvention *guess_convention(ghidra::Sleigh &translator);
 // register.
 Storage register_storage(ghidra::Sleigh &translator, const std::string &name);
 
+// Storage the caller can still read after a function returns: the result
+// register, the stack pointer and the callee-saved registers.
+//
+// Needed in three places that must agree -- phi placement, dead-code
+// elimination and expression folding -- because all three otherwise mistake
+// the function's own output for something nobody wanted.
+std::vector<Storage> observable_storage(const CallingConvention *abi,
+                                        ghidra::Sleigh *translator);
+
 // Context a spec needs before it decodes the way its name suggests.
 //
 // A .sla on its own has no default mode -- that lives in Ghidra's .ldefs,

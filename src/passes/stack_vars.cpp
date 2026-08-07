@@ -15,6 +15,7 @@
 
 #include <map>
 #include <ostream>
+#include <set>
 #include <sstream>
 
 namespace ddd {
@@ -180,6 +181,12 @@ public:
     // offset -> widest access seen there
     std::map<int64_t, unsigned> slots;
 
+    // A slot holding a register the function must give back untouched. The
+    // prologue stores the incoming value there and the epilogue loads it back;
+    // neither is anything the program asked for.
+    std::map<int64_t, std::string> saved;
+    find_saved_registers(fn, ctx, result, saved);
+
     fn.for_each_op([&](SsaOp &op) {
       // LOAD: out = *ins[1]. STORE: *ins[1] = ins[2]. ins[0] is the space id.
       const bool load = op.opc == ghidra::CPUI_LOAD;
@@ -194,6 +201,16 @@ public:
       const StackValue &address = result[*op.ins[1].value];
       if (address.state != StackValue::Frame)
         return;
+
+      // Saving and restoring a callee-saved register is frame bookkeeping.
+      // The slot is not a variable of the program and the accesses are not
+      // statements of it.
+      auto saved_slot = saved.find(address.value);
+      if (saved_slot != saved.end()) {
+        ctx.annotations->mark_plumbing(op);
+        ctx.annotations->set_label(*op.ins[1].value, "&" + saved_slot->second);
+        return;
+      }
 
       unsigned width = load ? (op.out != nullptr ? op.out->storage.size : 0)
                             : (op.ins.size() > 2 ? op.ins[2].raw.size : 0);
@@ -210,7 +227,7 @@ public:
                                        frame_expression(address.value) + "]");
     });
 
-    report(fn, ctx, slots);
+    report(fn, ctx, slots, saved);
   }
 
 private:
@@ -227,8 +244,73 @@ private:
     ctx.annotations->set_label(*op.out, frame_expression(value.value));
   }
 
+  // A store of a register's *incoming* value into a frame slot is a
+  // callee-save spill: the value existed before the function did, so nothing
+  // here computed it, and the only reason to write it down is to put it back.
+  static void find_saved_registers(SsaFunction &fn, PassContext &ctx,
+                                   const SparseResult<StackValue> &result,
+                                   std::map<int64_t, std::string> &saved) {
+    // Only registers the convention says must be given back. Spilling an
+    // *argument* register also stores a live-in value to a frame slot, but
+    // that slot holds a parameter -- a real variable of the program -- and
+    // hiding it would lose argc and argv.
+    std::set<Storage> preserved;
+    if (ctx.abi() != nullptr && ctx.translator() != nullptr) {
+      for (const std::string &name : ctx.abi()->preserved) {
+        Storage storage = register_storage(*ctx.translator(), name);
+        if (storage.space != nullptr) preserved.insert(storage);
+      }
+    }
+    if (preserved.empty()) return;
+
+    fn.for_each_op([&](SsaOp &op) {
+      if (op.opc != ghidra::CPUI_STORE || op.ins.size() < 3) return;
+      if (!op.ins[1].is_tracked() || !op.ins[2].is_tracked()) return;
+
+      const StackValue &address = result[*op.ins[1].value];
+      if (address.state != StackValue::Frame) return;
+
+      // A push routes the register through a temporary, so follow the copies
+      // to whatever originally produced the value.
+      const SsaValue *stored = original(op.ins[2].value);
+      if (stored == nullptr || !stored->is_live_in()) return;
+      if (preserved.count(stored->storage) == 0) return;
+
+      saved[address.value] = "saved_" + register_name(ctx, *stored);
+    });
+  }
+
+  // Through COPY chains to the value that was really stored. `push rbx`
+  // lowers to `t = RBX; [rsp] = t`, so the operand of the store is a
+  // temporary and the live-in is one step behind it.
+  static const SsaValue *original(const SsaValue *value) {
+    for (int guard = 0; guard < 64 && value != nullptr; ++guard) {
+      const SsaOp *def = value->def;
+      if (def == nullptr || def->opc != ghidra::CPUI_COPY || def->ins.size() != 1)
+        return value;
+      if (!def->ins[0].is_tracked()) return value;
+      value = def->ins[0].value;
+    }
+    return value;
+  }
+
+  static std::string register_name(const PassContext &ctx, const SsaValue &value) {
+    const std::string full = ctx.name_of(value);
+    const size_t hash = full.rfind('#');
+    return hash == std::string::npos ? full : full.substr(0, hash);
+  }
+
   static void report(const SsaFunction &fn, PassContext &ctx,
-                     const std::map<int64_t, unsigned> &slots) {
+                     const std::map<int64_t, unsigned> &slots,
+                     const std::map<int64_t, std::string> &saved) {
+    if (!saved.empty()) {
+      std::ostringstream registers;
+      registers << "saves:";
+      for (const auto &entry : saved)
+        registers << " " << entry.second.substr(6); // drop the "saved_"
+      ctx.annotations->comment_block(fn.cfg().entry, registers.str());
+    }
+
     if (slots.empty()) {
       if (ctx.verbose)
         ctx.stream() << "  no stack slots found\n";

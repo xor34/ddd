@@ -26,6 +26,8 @@ class Sleigh;
 
 namespace ddd {
 
+class Project;
+
 // Everything a pass needs besides the function itself.
 //
 // `target` is the one for *this* function, not for the file: an image can
@@ -38,6 +40,8 @@ struct PassContext {
   // Function addresses to names, when the container carried a symbol table.
   // The only naming in this tool that is not a guess.
   const std::map<uint64_t, std::string> *symbols = nullptr;
+  // Names and comments the user chose; they override anything generated.
+  const Project *project = nullptr;
   std::ostream *out = nullptr; // where passes report; defaults to stdout
   bool verbose = false;
   // Show the machine bookkeeping the high-level listing hides: stack-pointer

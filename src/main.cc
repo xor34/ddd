@@ -10,9 +10,11 @@
 #include "extract.h"
 #include "image.h"
 #include "pass.h"
+#include "project.h"
 #include "script.h"
 #include "ssa.h"
 #include "target.h"
+#include "xrefs.h"
 
 #include "error.hh"
 #include "sleigh.hh"
@@ -23,7 +25,9 @@
 #include <fstream>
 #include <deque>
 #include <map>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <memory>
 #include <string>
@@ -85,6 +89,10 @@ ABSL_FLAG(std::string, transform, "",
           "Run the image through this script before analysing it (decryption, "
           "unpacking)");
 
+ABSL_FLAG(bool, interactive, false,
+          "Start an interactive session instead of printing one listing");
+ABSL_FLAG(std::string, project, "",
+          "Where to keep names and comments (default: <file>.ddd)");
 ABSL_FLAG(bool, show_machine_state, false,
           "Show stack-pointer updates and the return-address push a call "
           "performs, which the high-level listing hides");
@@ -95,7 +103,8 @@ ABSL_FLAG(bool, list_passes, false,
 ABSL_FLAG(std::vector<std::string>, passes,
           std::vector<std::string>({"stack-vars", "simplify", "dce", "idioms",
                                     "data-refs", "symbols", "rename",
-                                    "name-vars", "calling-conv", "hil"}),
+                                    "name-vars", "types", "user-names",
+                                    "calling-conv", "hil"}),
           "Passes to run over each region. Ends in `hil` for the readable "
           "expression form; swap it for `print-ssa` to see one line per p-code "
           "op. py:<path> runs an external script.");
@@ -159,6 +168,14 @@ std::string resolve_spec(const std::string &spec, const std::string &spec_dir) {
 //
 // Returns empty (having explained why) when there is nothing to do.
 std::vector<ddd::ElfRange> choose_ranges(ddd::ElfInfo &elf) {
+  std::vector<ddd::ElfRange> executable_ranges;
+  for (const ddd::ElfRange &range : elf.ranges)
+    if (range.executable) executable_ranges.push_back(range);
+
+  // An interactive session chooses functions as it goes; all it needs from
+  // here is somewhere to hang the target, and none of the explaining.
+  if (absl::GetFlag(FLAGS_interactive)) return executable_ranges;
+
   const std::vector<std::string> wanted = absl::GetFlag(FLAGS_function);
 
   if (!wanted.empty()) {
@@ -176,9 +193,7 @@ std::vector<ddd::ElfRange> choose_ranges(ddd::ElfInfo &elf) {
     return chosen;
   }
 
-  std::vector<ddd::ElfRange> executable;
-  for (const ddd::ElfRange &range : elf.ranges)
-    if (range.executable) executable.push_back(range);
+  const std::vector<ddd::ElfRange> &executable = executable_ranges;
 
   if (absl::GetFlag(FLAGS_whole_segment) || elf.functions.empty()) {
     if (executable.empty())
@@ -314,12 +329,13 @@ struct Lifted {
 };
 
 // Sweeps a region and returns what it decoded, or null if nothing did.
-std::unique_ptr<Lifted> lift(const ddd::Region &region, uint64_t entry) {
+std::unique_ptr<Lifted> lift(const ddd::Region &region, uint64_t entry,
+                             int max_override = 0) {
   ghidra::Sleigh &translator = *region.target->translator;
   ghidra::Address start(translator.getDefaultCodeSpace(),
                         entry != 0 ? entry : region.begin);
 
-  int max = absl::GetFlag(FLAGS_max);
+  int max = max_override != 0 ? max_override : absl::GetFlag(FLAGS_max);
   if (absl::GetFlag(FLAGS_disasm))
     print_disassembly(translator, start.getOffset(), region.end, max);
 
@@ -337,7 +353,8 @@ std::unique_ptr<Lifted> lift(const ddd::Region &region, uint64_t entry) {
 // says nothing about another's.
 void analyse(const Lifted &lifted, const ddd::Image &image,
              const ddd::PassManager &manager,
-             const std::map<uint64_t, std::string> *symbols) {
+             const std::map<uint64_t, std::string> *symbols,
+             const ddd::Project *project = nullptr, bool verbose = true) {
   const ddd::Region &region = lifted.region;
   std::cout << "\n=== region 0x" << std::hex << region.begin << "-0x"
             << region.end << std::dec << "  " << region.name << " ===\n";
@@ -346,7 +363,13 @@ void analyse(const Lifted &lifted, const ddd::Image &image,
     std::cout << ddd::to_string(lifted.cfg);
   }
 
-  ddd::SsaFunction fn = ddd::build_ssa(lifted.cfg);
+  // Phi placement is pruned by liveness, so it has to be told what the caller
+  // still reads -- otherwise the function's own result looks dead at the exit.
+  ddd::SsaOptions options;
+  options.live_at_exit = ddd::observable_storage(
+      region.target->abi, region.target->translator);
+
+  ddd::SsaFunction fn = ddd::build_ssa(lifted.cfg, options);
   ddd::Annotations annotations;
 
   ddd::PassContext ctx;
@@ -355,9 +378,307 @@ void analyse(const Lifted &lifted, const ddd::Image &image,
   ctx.annotations = &annotations;
   ctx.symbols = symbols;
   ctx.out = &std::cout;
-  ctx.verbose = true;
+  ctx.verbose = verbose;
   ctx.show_machine_state = absl::GetFlag(FLAGS_show_machine_state);
+  ctx.project = project;
   manager.run(fn, ctx);
+}
+
+// ---- interactive session ------------------------------------------------
+//
+// Modelled on radare2's shape rather than its exact command set: there is a
+// current address ("seek"), commands are short and mean the same thing
+// wherever you are, and everything acts on the seek unless told otherwise
+// with `@`.
+//
+// The other half of being usable is silence. The batch pipeline narrates what
+// every pass did, which is right for a one-shot run and unbearable when you
+// are listing a function every few seconds, so listings are quiet unless asked.
+
+struct Session {
+  ddd::ElfInfo *elf = nullptr;
+  ddd::Image *image = nullptr;
+  ddd::TargetSet *targets = nullptr;
+  const ddd::PassManager *manager = nullptr;
+  ddd::Project project;
+  std::string project_path;
+
+  ddd::Region prototype; // the target every function here is lifted with
+  uint64_t seek = 0;
+  bool verbose = false;
+
+  std::unique_ptr<ddd::Xrefs> xrefs; // built on demand: it costs a full sweep
+};
+
+// Anything that names a place: a symbol, or a number in any base.
+bool resolve(const Session &session, const std::string &what, uint64_t &out) {
+  auto named = session.elf->functions.find(what);
+  if (named != session.elf->functions.end()) {
+    out = named->second.begin;
+    return true;
+  }
+
+  try {
+    size_t consumed = 0;
+    out = std::stoull(what, &consumed, 0);
+    return consumed == what.size();
+  } catch (...) {
+    return false;
+  }
+}
+
+const ddd::ElfRange *function_at(const Session &session, uint64_t address) {
+  for (const auto &entry : session.elf->functions) {
+    if (entry.first != entry.second.name) continue; // skip the mangled alias
+    if (address >= entry.second.begin && address < entry.second.end)
+      return &entry.second;
+  }
+  return nullptr;
+}
+
+std::string function_name_at(const Session &session, uint64_t address) {
+  const ddd::ElfRange *range = function_at(session, address);
+  return range == nullptr ? std::string() : range->name;
+}
+
+void print_function(Session &session, const ddd::ElfRange &range,
+                    const std::vector<std::string> &passes) {
+  ddd::PassManager manager;
+  for (const std::string &name : passes) manager.add(name);
+
+  ddd::Region region = session.prototype;
+  region.begin = range.begin;
+  region.end = range.end;
+  region.name = range.name + " (" + region.target->name + ")";
+
+  std::unique_ptr<Lifted> lifted = lift(region, range.begin);
+  if (lifted == nullptr) {
+    std::cout << "nothing could be disassembled at " << range.name << "\n";
+    return;
+  }
+
+  analyse(*lifted, *session.image, manager, &session.elf->symbols, &session.project,
+          session.verbose);
+}
+
+// One sweep of the whole executable range, not one per function.
+void build_xrefs(Session &session) {
+  if (session.xrefs != nullptr) return;
+
+  session.xrefs = std::make_unique<ddd::Xrefs>();
+  std::cout << "analysing all references..." << std::flush;
+
+  for (const ddd::ElfRange &range : session.elf->ranges) {
+    if (!range.executable) continue;
+
+    ddd::Region region = session.prototype;
+    region.begin = range.begin;
+    region.end = range.end;
+
+    // The whole range, not the per-run --max: an index that stops a third of
+    // the way through .text reports "no references" for everything past the
+    // cut, which is worse than not having one.
+    std::unique_ptr<Lifted> lifted =
+        lift(region, range.begin, std::numeric_limits<int>::max());
+    if (lifted == nullptr) continue;
+    session.xrefs->add(lifted->cfg, "");
+  }
+
+  std::cout << " " << session.xrefs->size() << " reference(s)\n";
+}
+
+void print_xrefs(Session &session, uint64_t address) {
+  build_xrefs(session);
+
+  const std::vector<ddd::Xref> &found = session.xrefs->to(address);
+  std::cout << found.size() << " reference(s) to 0x" << std::hex << address << std::dec;
+  if (const std::string name = function_name_at(session, address); !name.empty())
+    std::cout << "  " << name;
+  std::cout << "\n";
+
+  for (const ddd::Xref &xref : found) {
+    std::cout << "  0x" << std::hex << xref.from << std::dec << "  " << xref.kind;
+    if (const std::string in = function_name_at(session, xref.from); !in.empty())
+      std::cout << "  in " << in;
+    std::cout << "\n";
+  }
+}
+
+void print_help() {
+  std::cout <<
+      "  s [place]        seek, or show where you are. a symbol or a number\n"
+      "  afl [pattern]    list functions\n"
+      "  af.              which function the seek is in\n"
+      "  afn <name>       rename the function at the seek\n"
+      "  afv <old> <new>  rename a variable in the function at the seek\n"
+      "  pdf              print the function at the seek\n"
+      "  pdp              print it as p-code SSA instead\n"
+      "  pdm              print it with the machine bookkeeping shown\n"
+      "  aa               index every reference in the image\n"
+      "  axt [place]      what refers to the seek\n"
+      "  CC <text>        comment the seek\n"
+      "  e verbose=0|1    narrate what the passes do\n"
+      "  ?  q             this, and quit\n"
+      "\n"
+      "  any command takes `@ place` to run somewhere else without moving:\n"
+      "    pdf @ main\n";
+}
+
+const std::vector<std::string> &default_passes() {
+  static const std::vector<std::string> passes = absl::GetFlag(FLAGS_passes);
+  return passes;
+}
+
+std::vector<std::string> passes_ending_in(const std::string &last) {
+  std::vector<std::string> passes;
+  for (const std::string &name : default_passes())
+    if (name != "hil" && name != "print-ssa") passes.push_back(name);
+  passes.push_back(last);
+  return passes;
+}
+
+int interactive(Session &session) {
+  std::cout << "project " << session.project_path
+            << (session.project.empty() ? " (new)" : " (loaded)") << "\n"
+            << "`?` for commands\n";
+
+  if (session.elf->entry != 0) session.seek = session.elf->entry;
+
+  std::string line;
+  while (true) {
+    std::cout << "[0x" << std::setw(8) << std::setfill('0') << std::hex << session.seek
+              << std::dec << std::setfill(' ');
+    if (const std::string name = function_name_at(session, session.seek); !name.empty())
+      std::cout << " " << name;
+    std::cout << "]> " << std::flush;
+
+    if (!std::getline(std::cin, line)) break;
+
+    // `command @ place` runs somewhere else without moving the seek.
+    uint64_t here = session.seek;
+    if (const size_t at = line.rfind('@'); at != std::string::npos) {
+      std::string where = line.substr(at + 1);
+      while (!where.empty() && where.front() == ' ') where.erase(0, 1);
+      while (!where.empty() && where.back() == ' ') where.pop_back();
+
+      if (!where.empty() && !resolve(session, where, here)) {
+        std::cout << "cannot resolve " << where << "\n";
+        continue;
+      }
+      line.resize(at);
+    }
+
+    std::istringstream fields(line);
+    std::string verb;
+    fields >> verb;
+    if (verb.empty()) continue;
+
+    if (verb == "q" || verb == "quit" || verb == "exit") break;
+
+    if (verb == "?" || verb == "help") {
+      print_help();
+
+    } else if (verb == "s") {
+      std::string where;
+      fields >> where;
+      if (where.empty()) {
+        std::cout << "0x" << std::hex << session.seek << std::dec << "\n";
+      } else if (!resolve(session, where, session.seek)) {
+        std::cout << "cannot resolve " << where << "\n";
+      }
+
+    } else if (verb == "afl") {
+      std::string pattern;
+      fields >> pattern;
+      int shown = 0;
+      for (const auto &entry : session.elf->functions) {
+        if (entry.first != entry.second.name) continue;
+        if (!pattern.empty() && entry.first.find(pattern) == std::string::npos) continue;
+        std::cout << "  0x" << std::hex << entry.second.begin << std::dec << "  "
+                  << (entry.second.end - entry.second.begin) << "\t" << entry.first
+                  << "\n";
+        ++shown;
+      }
+      std::cout << shown << " function(s)\n";
+
+    } else if (verb == "af.") {
+      const ddd::ElfRange *range = function_at(session, here);
+      if (range == nullptr) std::cout << "no function here\n";
+      else
+        std::cout << range->name << "  0x" << std::hex << range->begin << "-0x"
+                  << range->end << std::dec << "\n";
+
+    } else if (verb == "pdf" || verb == "pdp" || verb == "pdm") {
+      const ddd::ElfRange *range = function_at(session, here);
+      if (range == nullptr) {
+        std::cout << "no function here -- `s <name>` or `afl` to find one\n";
+        continue;
+      }
+      const bool machine = verb == "pdm";
+      const bool was = absl::GetFlag(FLAGS_show_machine_state);
+      absl::SetFlag(&FLAGS_show_machine_state, machine || was);
+      print_function(session, *range,
+                     passes_ending_in(verb == "pdp" ? "print-ssa" : "hil"));
+      absl::SetFlag(&FLAGS_show_machine_state, was);
+
+    } else if (verb == "aa") {
+      build_xrefs(session);
+
+    } else if (verb == "axt") {
+      std::string where;
+      fields >> where;
+      uint64_t address = here;
+      if (!where.empty() && !resolve(session, where, address)) {
+        std::cout << "cannot resolve " << where << "\n";
+        continue;
+      }
+      print_xrefs(session, address);
+
+    } else if (verb == "afn") {
+      const ddd::ElfRange *range = function_at(session, here);
+      std::string name;
+      fields >> name;
+      if (range == nullptr || name.empty()) {
+        std::cout << "usage: afn <name>, at a function\n";
+        continue;
+      }
+      session.project.rename_function(range->begin, name);
+      std::cout << "0x" << std::hex << range->begin << std::dec << " is now " << name
+                << "\n";
+
+    } else if (verb == "afv") {
+      const ddd::ElfRange *range = function_at(session, here);
+      std::string old_name, new_name;
+      fields >> old_name >> new_name;
+      if (range == nullptr || old_name.empty() || new_name.empty()) {
+        std::cout << "usage: afv <old> <new>, at a function\n";
+        continue;
+      }
+      session.project.rename_variable(range->begin, old_name, new_name);
+      print_function(session, *range, passes_ending_in("hil"));
+
+    } else if (verb == "CC") {
+      std::string text;
+      std::getline(fields, text);
+      if (!text.empty() && text.front() == ' ') text.erase(0, 1);
+      session.project.set_comment(here, text);
+      std::cout << "noted at 0x" << std::hex << here << std::dec << "\n";
+
+    } else if (verb == "e") {
+      std::string setting;
+      fields >> setting;
+      if (setting == "verbose=1") session.verbose = true;
+      else if (setting == "verbose=0") session.verbose = false;
+      else std::cout << "only verbose=0|1 for now\n";
+
+    } else {
+      std::cout << verb << "? `?` for commands\n";
+    }
+  }
+
+  if (!session.project.empty() && session.project.save(session.project_path))
+    std::cout << "wrote " << session.project_path << "\n";
+  return 0;
 }
 
 } // namespace
@@ -515,6 +836,42 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  // Names and comments the user chose live beside the binary, so a second run
+  // starts where the first left off.
+  ddd::Project project;
+  std::string project_path = absl::GetFlag(FLAGS_project);
+  if (project_path.empty() && !path.empty()) project_path = path + ".ddd";
+  if (!project_path.empty()) project.load(project_path);
+
+  if (absl::GetFlag(FLAGS_interactive)) {
+    if (!elf.ok || elf.functions.empty()) {
+      std::cerr << "interactive mode needs a container with a symbol table\n";
+      return 2;
+    }
+
+    Session session;
+    session.elf = &elf;
+    session.image = &image;
+    session.targets = &targets;
+    session.manager = &manager;
+    session.project = std::move(project);
+    session.project_path = project_path;
+    session.prototype = regions.front();
+
+    // Every function is data until something is disassembled, so tell the
+    // image what the container said is code before any listing is produced.
+    uint64_t code_begin = image.limit();
+    uint64_t code_end = image.base();
+    for (const ddd::ElfRange &range : elf.ranges) {
+      if (!range.executable) continue;
+      code_begin = std::min(code_begin, range.begin);
+      code_end = std::max(code_end, range.end);
+    }
+    if (code_end > code_begin) image.set_code_range(code_begin, code_end);
+
+    return interactive(session);
+  }
+
   // Sweep everything first. What the sweeps actually covered -- not what the
   // regions nominally span -- is the code range, and the rest of the image is
   // the data that data-refs resolves pointers into. A region bounded by --max
@@ -596,7 +953,7 @@ int main(int argc, char **argv) {
   // straight from the container when there was one.
   const std::map<uint64_t, std::string> *symbols = elf.ok ? &elf.symbols : nullptr;
   for (const std::unique_ptr<Lifted> &one : lifted)
-    analyse(*one, image, manager, symbols);
+    analyse(*one, image, manager, symbols, &project);
 
   return 0;
 }

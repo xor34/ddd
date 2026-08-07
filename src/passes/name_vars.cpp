@@ -54,6 +54,14 @@ public:
   void run(SsaFunction &fn, PassContext &ctx) override {
     if (ctx.annotations == nullptr) return;
 
+    // A Pass object outlives one function: the manager holds it and runs it
+    // against every function analysed. Anything kept in a member has to be
+    // cleared here, or the second function inherits the first's numbering and
+    // silently gets no names at all.
+    counts_.clear();
+    seen_.clear();
+    return_address_ = Storage{};
+
     Hil hil = build_hil(fn, ctx);
     argument_registers(ctx);
 

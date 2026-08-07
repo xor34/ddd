@@ -96,6 +96,28 @@ Storage register_storage(ghidra::Sleigh &translator, const std::string &name) {
   }
 }
 
+std::vector<Storage> observable_storage(const CallingConvention *abi,
+                                        ghidra::Sleigh *translator) {
+  std::vector<Storage> result;
+  if (abi == nullptr || translator == nullptr)
+    return result;
+
+  auto add = [&](const std::string &name) {
+    if (name.empty())
+      return;
+    Storage storage = register_storage(*translator, name);
+    if (storage.space != nullptr)
+      result.push_back(storage);
+  };
+
+  add(abi->result);
+  add(abi->stack_pointer);
+  for (const std::string &name : abi->preserved)
+    add(name);
+
+  return result;
+}
+
 std::vector<std::string> default_context(const std::string &spec_path) {
   const std::string stem = std::filesystem::path(spec_path).stem().string();
 

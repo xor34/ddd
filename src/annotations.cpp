@@ -72,12 +72,19 @@ const std::string &Annotations::label(const SsaValue &value) const {
   return it == labels_.end() ? none : it->second;
 }
 
+void Annotations::mark_plumbing(const SsaOp &op) { plumbing_.insert(op.id); }
+
+bool Annotations::is_plumbing(const SsaOp &op) const {
+  return plumbing_.count(op.id) != 0;
+}
+
 void Annotations::clear() {
   op_comments_.clear();
   block_comments_.clear();
   labels_.clear();
   aliases_.clear();
   display_names_.clear();
+  plumbing_.clear();
 }
 
 } // namespace ddd

@@ -1,0 +1,72 @@
+# The interactive session, shaped like radare2's: a current address, short
+# commands that mean the same thing wherever you are, and `@` to act somewhere
+# else without moving.
+#
+# Everything the analysis produces is derived -- run it again, get the same
+# answer. A name a person chose is not, so it goes in a project file beside the
+# binary and is applied on every later run.
+#
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'static int helper(int a, int b) { return a * b + 7; }' > %t/p.c
+# RUN: echo 'int compute(int n) { int t = 0; for (int i = 0; i < n; i++) t += helper(i, n); return t; }' >> %t/p.c
+# RUN: echo 'int main(void) { return compute(5); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# Build the session script, taking a real statement address out of a listing
+# rather than hardcoding one -- the layout moves with the compiler.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --function=compute --follow=0 > %t/listing.txt
+# RUN: grep -oE '^  0x[0-9a-f]+' %t/listing.txt | head -1 | tr -d ' \t' > %t/addr.txt
+
+# RUN: printf 's compute\naf.\npdf\naxt helper\nafv var_c total\nCC ' > %t/cmds.txt
+# RUN: printf 'running sum\n' >> %t/cmds.txt
+# RUN: printf 'q\n' >> %t/cmds.txt
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --interactive \
+# RUN:   < %t/cmds.txt | FileCheck %s
+
+# The prompt carries the seek and the function it lands in, so you always know
+# what a bare command will act on.
+# CHECK: [0x{{[0-9a-f]+}} _start]>
+# CHECK: [0x{{[0-9a-f]+}} compute]>
+
+# af. answers "where am I", which is the question a seek raises.
+# CHECK: compute  0x{{[0-9a-f]+}}-0x{{[0-9a-f]+}}
+
+# pdf is quiet: no pass narration, which is what made the first attempt at
+# this unusable.
+# CHECK: === region {{.*}}compute (x86-64) ===
+# CHECK-NOT: == stack-vars ==
+
+# Types are inferred from use, not from storage width. The loop counter is
+# compared with a signed op, so it is signed; the accumulator is not.
+# The list is sorted by name, so `cond` comes before `var_10`.
+# CHECK: ; vars:
+# CHECK-SAME: bool cond
+# CHECK-SAME: int32_t var_10
+
+# The question a per-function listing can never answer.
+# CHECK: analysing all references...
+# CHECK: 1 reference(s) to 0x{{[0-9a-f]+}}  helper
+# CHECK: call  in compute
+
+# Renaming re-renders, so the effect is visible at once.
+# CHECK: total = total + EAX
+
+# CHECK: wrote {{.*}}p.ddd
+
+
+# The project file is plain text in the same vocabulary as the commands.
+# RUN: FileCheck --check-prefix=FILE --input-file=%t/p.ddd %s
+
+# FILE-DAG: variable 0x{{[0-9a-f]+}} var_c total
+# FILE-DAG: comment 0x{{[0-9a-f]+}} running sum
+
+
+# And applied on the next run with no interaction at all. That is the whole
+# point: the analysis is reproducible, the decisions are kept.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd \
+# RUN:   --function=compute --follow=0 | FileCheck --check-prefix=AGAIN %s
+
+# AGAIN: total = total + EAX
+# AGAIN-NOT: var_c =

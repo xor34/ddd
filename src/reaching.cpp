@@ -5,33 +5,13 @@
 namespace ddd {
 namespace {
 
-std::vector<Storage> observable_storage(const PassContext &ctx) {
-  std::vector<Storage> result;
-  if (ctx.abi() == nullptr || ctx.translator() == nullptr)
-    return result;
-
-  auto add = [&](const std::string &name) {
-    if (name.empty())
-      return;
-    Storage storage = register_storage(*ctx.translator(), name);
-    if (storage.space != nullptr)
-      result.push_back(storage);
-  };
-
-  add(ctx.abi()->result);
-  add(ctx.abi()->stack_pointer);
-  for (const std::string &name : ctx.abi()->preserved)
-    add(name);
-
-  return result;
-}
-
 } // namespace
 
 std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx) {
   std::set<int> roots;
 
-  const std::vector<Storage> storages = observable_storage(ctx);
+  const std::vector<Storage> storages =
+      observable_storage(ctx.abi(), ctx.translator());
   if (storages.empty())
     return roots;
 

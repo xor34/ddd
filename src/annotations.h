@@ -18,6 +18,7 @@
 #include "ssa.h"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,15 @@ public:
     return !display_name(value).empty();
   }
 
+  // Marks an op as machine bookkeeping rather than program logic: saving a
+  // callee-saved register, restoring it, keeping the stack pointer up to
+  // date. The high-level listing hides these; --show_machine_state puts them
+  // back.
+  //
+  // Set by the pass that worked it out, not guessed at by the printer.
+  void mark_plumbing(const SsaOp &op);
+  bool is_plumbing(const SsaOp &op) const;
+
   void clear();
 
 private:
@@ -71,6 +81,7 @@ private:
   std::map<int, std::string> labels_;
   std::map<int, const SsaValue *> aliases_;
   std::map<int, std::string> display_names_;
+  std::set<int> plumbing_;
 };
 
 } // namespace ddd

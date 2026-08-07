@@ -90,6 +90,12 @@ bool default_track_filter(const VarnodeData &vn);
 
 struct SsaOptions {
   std::function<bool(const VarnodeData &)> track = default_track_filter;
+
+  // Storage the caller can still read once the function returns. Phi
+  // placement is pruned by liveness, and without this the function's own
+  // result looks dead at the exit -- so its phi is never placed and
+  // everything computing it follows.
+  std::vector<Storage> live_at_exit;
 };
 
 // SSA form of one Cfg. Borrows the Cfg -- it must outlive the SsaFunction.

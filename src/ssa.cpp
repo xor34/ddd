@@ -2,6 +2,8 @@
 
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace ddd {
 
@@ -69,6 +71,64 @@ void SsaFunction::rebuild_uses() {
   });
 }
 
+namespace {
+
+// Storage live on entry to each block, for pruned SSA.
+//
+// Cytron's placement puts a phi wherever a storage is defined on two paths,
+// whether or not anything downstream ever reads it. That is most of the phis
+// in a real function: every condition flag, and every Sleigh temporary, is
+// written on both arms of every branch and read by neither.
+//
+// A phi for a storage that is not live at the join defines a value nobody
+// wants, and -- because a phi counts as a use of all its operands -- keeps the
+// entire dead computation feeding it alive through dead-code elimination too.
+// So compute liveness first and place phis only where they mean something.
+std::vector<std::unordered_set<Storage, StorageHash>>
+live_in_storage(const Cfg &cfg,
+                const std::function<bool(const VarnodeData &)> &track,
+                const std::vector<Storage> &live_at_exit) {
+  const int n = cfg.size();
+  std::vector<std::unordered_set<Storage, StorageHash>> uses(n), defs(n), live(n);
+
+  for (int b = 0; b < n; ++b) {
+    for (const PcodeOp &op : cfg[b].ops) {
+      // Read before written in this block: live in.
+      for (const VarnodeData &in : op.inputs) {
+        if (!track(in)) continue;
+        const Storage storage = storage_of(in);
+        if (defs[b].count(storage) == 0) uses[b].insert(storage);
+      }
+      if (op.has_output && track(op.output))
+        defs[b].insert(storage_of(op.output));
+    }
+    live[b] = uses[b];
+
+    // Anything the caller reads is live where control leaves the function.
+    if (cfg[b].ends_in_return || cfg[b].succs.empty())
+      for (const Storage &storage : live_at_exit)
+        if (defs[b].count(storage) == 0) live[b].insert(storage);
+  }
+
+  // live_in[b] = uses[b] | (union of live_in[succ] - defs[b])
+  for (bool changed = true; changed;) {
+    changed = false;
+
+    for (int b = n; b-- > 0;) {
+      for (const Edge &edge : cfg[b].succs) {
+        for (const Storage &storage : live[edge.target]) {
+          if (defs[b].count(storage) != 0) continue;
+          if (live[b].insert(storage).second) changed = true;
+        }
+      }
+    }
+  }
+
+  return live;
+}
+
+} // namespace
+
 SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   SsaFunction fn;
   fn.cfg_ = &cfg;
@@ -118,7 +178,11 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
         op.raw_output = raw.output;
       }
 
-      note_output(op, raw.has_output ? storage_of(raw.output) : Storage{},
+      // storage_for, not storage_of: a Sleigh temporary belongs to the
+      // instruction that wrote it. Without that scope, one reused unique
+      // offset is one function-wide variable and every join gets a phi for it.
+      note_output(op,
+                  raw.has_output ? storage_of(raw.output) : Storage{},
                   renamed);
 
       if (renamed) {
@@ -130,6 +194,9 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   }
 
   // ---- 2. phis at the iterated dominance frontier of each storage ----
+  const std::vector<std::unordered_set<Storage, StorageHash>> live =
+      live_in_storage(cfg, track, options.live_at_exit);
+
   for (const auto &entry : def_sites) {
     const Storage &storage = entry.first;
     std::vector<int> worklist(entry.second.begin(), entry.second.end());
@@ -141,6 +208,9 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       worklist.pop_back();
 
       for (int d : dom.frontier[b]) {
+        // Pruned: no phi where the value is already dead.
+        if (live[d].count(storage) == 0)
+          continue;
         if (!placed.insert(d).second)
           continue;
 

@@ -264,6 +264,9 @@ private:
   // layout, the call itself), and shown in full they bury everything else --
   // `RSP_122 = phi(RSP_79, RSP_121)` is not what anyone came to read.
   bool is_plumbing(const SsaOp &op, const std::set<uint64_t> &call_addresses) const {
+    // Whatever the analysis already decided is bookkeeping.
+    if (ctx_.annotations != nullptr && ctx_.annotations->is_plumbing(op)) return true;
+
     if (stack_pointer_.space == nullptr) return false;
 
     // A write to the stack pointer itself.
