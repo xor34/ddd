@@ -1,9 +1,22 @@
+// main.cc -- disassemble a byte buffer with Sleigh, build a CFG, lift it to
+// SSA, and run passes over it.
+//
+//   ./sleigh_poc --sla=specs/x86-64.sla --bytes=4889f8 --passes=print-ssa
+#include "cfg.h"
+#include "pass.h"
+#include "ssa.h"
+
+#include "error.hh"
 #include "loadimage.hh"
 #include "sleigh.hh"
 
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -11,122 +24,84 @@
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 
-using namespace ghidra;
-
 ABSL_FLAG(std::string, sla, "", "SLA file");
 ABSL_FLAG(std::string, bytes, "", "Hex bytes");
 ABSL_FLAG(uint64_t, base, 0, "Base address");
 ABSL_FLAG(int, max, 100000, "Maximum instructions");
 ABSL_FLAG(std::vector<std::string>, ctx, {}, "Context variables NAME=VALUE");
+ABSL_FLAG(bool, disasm, false, "Print disassembly before lifting");
+ABSL_FLAG(bool, cfg, false, "Print the raw p-code CFG before lifting");
+ABSL_FLAG(bool, list_passes, false, "List the registered passes and exit");
+ABSL_FLAG(std::vector<std::string>, passes, std::vector<std::string>({"prune-phis", "print-ssa"}),
+          "Comma-separated passes to run over the SSA form");
 
-class BufferLoadImage final : public LoadImage {
-  uint64_t base_addr;
-  std::vector<uint1> data;
+namespace {
 
+class BufferLoadImage final : public ghidra::LoadImage {
 public:
-  BufferLoadImage(uint64_t base, std::vector<uint1> bytes)
-      : LoadImage("buffer"), base_addr(base), data(std::move(bytes)) {}
+  BufferLoadImage(uint64_t base, std::vector<ghidra::uint1> bytes)
+      : LoadImage("buffer"), base_addr_(base), data_(std::move(bytes)) {}
 
-  void loadFill(uint1 *ptr, int4 size, const Address &addr) override {
-    uintb start = addr.getOffset();
+  void loadFill(ghidra::uint1 *ptr, ghidra::int4 size,
+                const ghidra::Address &addr) override {
+    ghidra::uintb start = addr.getOffset();
 
-    for (int4 i = 0; i < size; ++i) {
-      uintb offset = start + i;
+    for (ghidra::int4 i = 0; i < size; ++i) {
+      ghidra::uintb offset = start + i;
 
-      if (offset < base_addr || offset >= base_addr + data.size()) {
+      if (offset < base_addr_ || offset >= base_addr_ + data_.size()) {
         ptr[i] = 0;
       } else {
-        ptr[i] = data[static_cast<size_t>(offset - base_addr)];
+        ptr[i] = data_[static_cast<size_t>(offset - base_addr_)];
       }
     }
   }
 
-  std::string getArchType(void) const override { return "buffer"; }
-
+  std::string getArchType() const override { return "buffer"; }
   void adjustVma(long) override {}
+  size_t size() const { return data_.size(); }
 
-  size_t size() const { return data.size(); }
+private:
+  uint64_t base_addr_;
+  std::vector<ghidra::uint1> data_;
 };
 
-class AssemblyPrinter final : public AssemblyEmit {
+class AssemblyPrinter final : public ghidra::AssemblyEmit {
 public:
-  void dump(const Address &addr, const std::string &mnem,
+  void dump(const ghidra::Address &addr, const std::string &mnem,
             const std::string &body) override {
-    std::cout << addr.getShortcut() << ":\t" << mnem << ' ' << body << '\n';
+    std::cout << "0x" << std::hex << addr.getOffset() << std::dec << ":\t" << mnem
+              << ' ' << body << '\n';
   }
 };
 
-static void print_varnode(std::ostream &os, const VarnodeData &varnode) {
-  os << '(' << varnode.space->getName() << ',';
-
-  varnode.space->printOffset(os, varnode.offset);
-
-  os << ',' << std::dec << varnode.size << ')';
-}
-
-class PcodePrinter final : public PcodeEmit {
-public:
-  void dump(const Address &addr, OpCode opcode, VarnodeData *outvar,
-            VarnodeData *vars, int4 input_size) override {
-    std::cout << "    ";
-
-    if (outvar) {
-      print_varnode(std::cout, *outvar);
-      std::cout << " = ";
-    }
-
-    std::cout << get_opname(opcode);
-
-    for (int4 i = 0; i < input_size; ++i) {
-      std::cout << ' ';
-      print_varnode(std::cout, vars[i]);
-    }
-
-    std::cout << '\n';
-  }
-};
-
-static std::vector<uint1> parse_hex(absl::string_view input) {
+std::vector<ghidra::uint1> parse_hex(absl::string_view input) {
   std::string clean;
+  for (char c : input)
+    if (std::isxdigit(static_cast<unsigned char>(c))) clean.push_back(c);
+  if (clean.size() & 1) clean.pop_back();
 
-  for (char c : input) {
-    if (std::isxdigit(static_cast<unsigned char>(c))) {
-      clean.push_back(c);
-    }
-  }
-
-  if (clean.size() & 1) {
-    clean.pop_back();
-  }
-
-  std::vector<uint1> result;
+  std::vector<ghidra::uint1> result;
   result.reserve(clean.size() / 2);
 
   for (size_t i = 0; i < clean.size(); i += 2) {
     uint32_t value;
-
-    if (!absl::SimpleHexAtoi(absl::string_view(clean).substr(i, 2), &value)) {
-      continue;
-    }
-
-    result.push_back(static_cast<uint1>(value));
+    if (!absl::SimpleHexAtoi(absl::string_view(clean).substr(i, 2), &value)) continue;
+    result.push_back(static_cast<ghidra::uint1>(value));
   }
 
   return result;
 }
 
-static bool parse_context(const std::vector<std::string> &args,
-                          ContextInternal &context) {
-  for (const auto &item : args) {
+bool parse_context(const std::vector<std::string> &args, ghidra::ContextInternal &context) {
+  for (const std::string &item : args) {
     std::vector<absl::string_view> parts = absl::StrSplit(item, '=');
-
     if (parts.size() != 2) {
       std::cerr << "bad ctx: " << item << '\n';
       return false;
     }
 
     uint64_t value;
-
     if (!absl::SimpleAtoi(parts[1], &value)) {
       std::cerr << "bad value: " << std::string(parts[1]) << '\n';
       return false;
@@ -134,7 +109,7 @@ static bool parse_context(const std::vector<std::string> &args,
 
     try {
       context.setVariableDefault(std::string(parts[0]), value);
-    } catch (LowlevelError &error) {
+    } catch (ghidra::LowlevelError &error) {
       std::cerr << "unknown context variable " << std::string(parts[0]) << ": "
                 << error.explain << '\n';
     }
@@ -143,80 +118,111 @@ static bool parse_context(const std::vector<std::string> &args,
   return true;
 }
 
-int main(int argc, char **argv) {
-  absl::ParseCommandLine(argc, argv);
+bool load_spec(ghidra::Sleigh &translator, const std::string &path) {
+  std::string absolute = std::filesystem::absolute(path).string();
+  std::istringstream wrapper("<sleigh>" + absolute + "</sleigh>");
 
-  std::string sla_path = absl::GetFlag(FLAGS_sla);
-  auto bytes = parse_hex(absl::GetFlag(FLAGS_bytes));
-
-  if (sla_path.empty() || bytes.empty()) {
-    std::cerr << "usage: --sla=file.sla --bytes=hex\n";
-    return 2;
-  }
-
-  uint64_t base_addr = absl::GetFlag(FLAGS_base);
-
-  AttributeId::initialize();
-  ElementId::initialize();
-
-  BufferLoadImage loader(base_addr, std::move(bytes));
-
-  ContextInternal context;
-  Sleigh translator(&loader, &context);
-
-  std::string abs_path = std::filesystem::absolute(sla_path).string();
-
-  std::istringstream wrapper("<sleigh>" + abs_path + "</sleigh>");
-
-  DocumentStorage storage;
-  Element *root;
-
+  ghidra::DocumentStorage storage;
   try {
-    root = storage.parseDocument(wrapper)->getRoot();
-  } catch (DecoderError &error) {
-    std::cerr << "Failed XML loader: " << error.explain << '\n';
-    return 1;
+    storage.registerTag(storage.parseDocument(wrapper)->getRoot());
+  } catch (ghidra::DecoderError &error) {
+    std::cerr << "failed parsing SLA wrapper: " << error.explain << '\n';
+    return false;
   }
-
-  storage.registerTag(root);
 
   try {
     translator.initialize(storage);
-  } catch (LowlevelError &error) {
-    std::cerr << "Failed loading SLA: " << error.explain << '\n';
+  } catch (ghidra::LowlevelError &error) {
+    std::cerr << "failed loading SLA: " << error.explain << '\n';
+    return false;
+  }
+
+  return true;
+}
+
+void print_disassembly(ghidra::Sleigh &translator, const ghidra::Address &start,
+                       const ghidra::Address &end, int max) {
+  AssemblyPrinter printer;
+  ghidra::Address addr = start;
+
+  for (int count = 0; addr < end && count < max; ++count) {
+    ghidra::int4 length = 1;
+    try {
+      length = translator.printAssembly(printer, addr);
+    } catch (ghidra::LowlevelError &error) {
+      std::cout << "0x" << std::hex << addr.getOffset() << std::dec << ":\t?? ("
+                << error.explain << ")\n";
+    }
+    addr = addr + (length > 0 ? length : 1);
+  }
+}
+
+int list_passes() {
+  for (const ddd::PassRegistry::Entry &entry : ddd::PassRegistry::instance().entries())
+    std::cout << "  " << entry.name << "\t" << entry.description << '\n';
+  return 0;
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  absl::ParseCommandLine(argc, argv);
+
+  if (absl::GetFlag(FLAGS_list_passes)) return list_passes();
+
+  std::string sla_path = absl::GetFlag(FLAGS_sla);
+  std::vector<ghidra::uint1> bytes = parse_hex(absl::GetFlag(FLAGS_bytes));
+  if (sla_path.empty() || bytes.empty()) {
+    std::cerr << "usage: --sla=file.sla --bytes=hex [--base=addr] [--passes=a,b]\n";
+    return 2;
+  }
+
+  ghidra::AttributeId::initialize();
+  ghidra::ElementId::initialize();
+
+  uint64_t base = absl::GetFlag(FLAGS_base);
+  BufferLoadImage loader(base, std::move(bytes));
+  ghidra::ContextInternal context;
+  ghidra::Sleigh translator(&loader, &context);
+
+  if (!load_spec(translator, sla_path)) return 1;
+  if (!parse_context(absl::GetFlag(FLAGS_ctx), context)) return 1;
+
+  ghidra::AddrSpace *code = translator.getDefaultCodeSpace();
+  ghidra::Address start(code, base);
+  ghidra::Address end(code, base + loader.size());
+  int max = absl::GetFlag(FLAGS_max);
+
+  if (absl::GetFlag(FLAGS_disasm)) print_disassembly(translator, start, end, max);
+
+  ddd::SweepLimits limits;
+  limits.max_instructions = max;
+  limits.end = end;
+
+  ddd::Cfg cfg = ddd::build_cfg(translator, start, limits);
+  if (cfg.empty()) {
+    std::cerr << "nothing could be disassembled at 0x" << std::hex << base << '\n';
     return 1;
   }
+  if (absl::GetFlag(FLAGS_cfg)) std::cout << ddd::to_string(cfg);
 
-  parse_context(absl::GetFlag(FLAGS_ctx), context);
+  ddd::SsaFunction fn = ddd::build_ssa(cfg);
 
-  AssemblyPrinter asm_emit;
-  PcodePrinter pcode_emit;
+  ddd::PassManager manager;
+  for (const std::string &name : absl::GetFlag(FLAGS_passes)) {
+    if (name.empty()) continue;
+    if (manager.add(name)) continue;
 
-  Address addr(translator.getDefaultCodeSpace(), base_addr);
-
-  Address end_addr(translator.getDefaultCodeSpace(), base_addr + loader.size());
-
-  int count = 0;
-
-  while (addr < end_addr && count < absl::GetFlag(FLAGS_max)) {
-    int4 length = 1;
-
-    try {
-      length = translator.printAssembly(asm_emit, addr);
-      translator.oneInstruction(pcode_emit, addr);
-    } catch (LowlevelError &error) {
-      std::cout << addr.getShortcut() << ":\t?? (" << error.explain << ")\n";
-
-      length = 1;
-    }
-
-    if (length <= 0) {
-      length = 1;
-    }
-
-    addr = addr + length;
-    ++count;
+    std::cerr << "unknown pass: " << name << "\n  known passes:\n";
+    list_passes();
+    return 2;
   }
+
+  ddd::PassContext ctx;
+  ctx.translator = &translator;
+  ctx.out = &std::cout;
+  ctx.verbose = true;
+  manager.run(fn, ctx);
 
   return 0;
 }

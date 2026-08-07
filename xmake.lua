@@ -108,7 +108,13 @@ target("sleigh_compile")
 
 target("sleigh_poc")
     set_kind("binary")
-    add_files("src/main.cc")
+
+    add_files(
+        "src/*.cc",
+        "src/*.cpp",
+        "src/passes/*.cpp"
+    )
+
     add_deps("sla")
     add_packages("abseil")
 
@@ -123,6 +129,10 @@ local specs_dir = "specs"
 
 target("sleigh_specs")
     set_kind("phony")
+
+    -- Opt-in: this clones Ghidra and recompiles every .slaspec, so a plain
+    -- `xmake` should not trigger it. Run `xmake build sleigh_specs`.
+    set_default(false)
 
     add_deps("sleigh_compile")
 
