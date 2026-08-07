@@ -40,6 +40,9 @@ struct PassContext {
   const std::map<uint64_t, std::string> *symbols = nullptr;
   std::ostream *out = nullptr; // where passes report; defaults to stdout
   bool verbose = false;
+  // Show the machine bookkeeping the high-level listing hides: stack-pointer
+  // updates and the return-address push a call performs.
+  bool show_machine_state = false;
 
   ghidra::Sleigh *translator() const;
   const CallingConvention *abi() const;

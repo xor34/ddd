@@ -92,13 +92,10 @@ private:
   }
 
   static std::string derive(const SsaOp &op, const Annotations &annotations) {
-    // Loading through a named address gives you that variable's contents.
-    if (op.opc == ghidra::CPUI_LOAD && op.ins.size() >= 2 &&
-        op.ins[1].is_tracked()) {
-      const std::string &address = annotations.label(*op.ins[1].value);
-      if (address.size() > 1 && address[0] == '&')
-        return address.substr(1);
-    }
+    // A load through a named stack address is deliberately *not* named here.
+    // The high-level listing writes the load as the slot itself, so naming its
+    // result too would produce `var_1c = var_1c` and, worse, pin the result
+    // down as a variable when it should fold into whatever reads it.
 
     // A phi of values that all agree on a name keeps it.
     if (op.is_phi && !op.ins.empty()) {

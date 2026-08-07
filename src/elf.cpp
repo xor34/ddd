@@ -1,6 +1,8 @@
 #include "elf.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cxxabi.h>
 #include <sstream>
 
 namespace ddd {
@@ -94,6 +96,41 @@ const char *machine_name(uint16_t machine) {
   case 0xf3: return "RISC-V";
   default: return "unknown";
   }
+}
+
+// `_ZN6ghidraL7run_xmlERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE...`
+// is not a name a person can read, and leaving the reader to demangle it in
+// their head is the sort of thing that makes output feel like a debug dump.
+//
+// The parameter list goes too: it is usually longer than everything else on
+// the line and says little at a call site. `ghidra::run_xml` is the useful
+// part.
+std::string demangle(const std::string &name) {
+  if (name.size() < 3 || name[0] != '_' || name[1] != 'Z') return name;
+
+  int status = 0;
+  char *readable = abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status);
+  if (status != 0 || readable == nullptr) {
+    std::free(readable);
+    return name;
+  }
+
+  std::string text(readable);
+  std::free(readable);
+
+  // Truncate at the argument list, ignoring parentheses inside template
+  // arguments.
+  int depth = 0;
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '<') ++depth;
+    else if (text[i] == '>') --depth;
+    else if (text[i] == '(' && depth == 0) {
+      text.resize(i);
+      break;
+    }
+  }
+
+  return text.empty() ? name : text;
 }
 
 struct Section {
@@ -213,8 +250,12 @@ void read_plt(Reader &reader, ElfInfo &info, const std::vector<Section> &section
     extent.name = name + "@plt";
     extent.executable = true;
 
-    info.symbols.emplace(stub, name + "@plt");
+    const std::string readable = demangle(name) + "@plt";
+    extent.name = readable;
+
+    info.symbols.emplace(stub, readable);
     info.functions.emplace(name + "@plt", extent);
+    if (readable != name + "@plt") info.functions.emplace(readable, extent);
   }
 }
 
@@ -247,15 +288,21 @@ void read_symbols(Reader &reader, ElfInfo &info, const std::vector<Section> &sec
                                           static_cast<size_t>(strings.size), name_index);
       if (name.empty()) continue;
 
+      const std::string readable = demangle(name);
+
       if (size != 0) {
         ElfRange extent;
         extent.begin = value;
         extent.end = value + size;
-        extent.name = name;
+        extent.name = readable;
         extent.executable = true;
+
+        // Both spellings select the function: the mangled one is what a tool
+        // prints, the readable one is what a person types.
         info.functions.emplace(name, extent);
+        if (readable != name) info.functions.emplace(readable, extent);
       }
-      info.symbols.emplace(value, std::move(name));
+      info.symbols.emplace(value, readable);
     }
   }
 }

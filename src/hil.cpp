@@ -88,6 +88,20 @@ std::string hex(uint64_t value) {
   return os.str();
 }
 
+// A leading `&` on a label means specifically a frame-slot address, set by
+// stack-vars -- nothing else may use that spelling, or its definition would be
+// hidden here as though it were one.
+//
+// stack-vars labels the address of a frame slot `&var_18`. The slot itself is
+// the variable a reader cares about, so a load or store through that address
+// is written as the variable -- and the line computing the address stops being
+// worth showing at all.
+const std::string *slot_name(ExprRef expr) {
+  if (expr == nullptr || expr->kind != ExprKind::Variable) return nullptr;
+  if (expr->text.size() < 2 || expr->text[0] != '&') return nullptr;
+  return &expr->text;
+}
+
 } // namespace
 
 class HilBuilder {
@@ -96,6 +110,7 @@ public:
       : fn_(fn), ctx_(ctx), hil_(hil) {}
 
   void run() {
+    stack_pointer_ = ctx_.stack_pointer();
     count_versions();
     observable_ = observable_values(fn_, ctx_);
 
@@ -141,6 +156,26 @@ public:
     expr.precedence = precedence;
     expr.operands = {left, right};
     return make(std::move(expr));
+  }
+
+  // `x + 0xffffffffffffffec` is `x - 0x14`, and a stack offset written the
+  // first way is close to unreadable. Only for add and subtract, where the
+  // sign of the constant is what it means.
+  ExprRef additive(const char *op, ExprRef left, ExprRef right) {
+    const bool add = std::string(op) == "+";
+    if (right != nullptr && right->kind == ExprKind::Constant && right->size != 0 &&
+        right->size <= 8) {
+      const uint64_t sign = uint64_t(1) << (right->size * 8 - 1);
+      const uint64_t mask = right->size >= 8 ? ~uint64_t(0)
+                                             : (uint64_t(1) << (right->size * 8)) - 1;
+      const uint64_t bits = right->constant & mask;
+
+      if ((bits & sign) != 0) {
+        const uint64_t magnitude = (mask - bits + 1) & mask;
+        return binary(add ? "-" : "+", kAdditive, left, constant(magnitude, right->size));
+      }
+    }
+    return binary(op, kAdditive, left, right);
   }
 
   // The value of an operand, folded if it can be.
@@ -201,6 +236,52 @@ private:
 
     const size_t hash = full.rfind('#');
     return hash == std::string::npos ? full : full.substr(0, hash);
+  }
+
+  bool hides_machine_state() const { return !ctx_.show_machine_state; }
+
+  // The spelling stack-vars uses for "the stack pointer, at this offset".
+  static bool is_frame_expression(const std::string &label) {
+    if (label == "sp") return true;
+    return label.size() > 3 && label.compare(0, 2, "sp") == 0 &&
+           (label[2] == '+' || label[2] == '-');
+  }
+
+  // `&var_1c = sp - 0x14` says nothing once the accesses through it are
+  // written as `var_1c`: it is the address-of a variable that is about to be
+  // named directly.
+  bool defines_slot_address(const SsaOp &op) const {
+    if (op.out == nullptr || ctx_.annotations == nullptr) return false;
+    if (ctx_.show_machine_state) return false;
+
+    const std::string &label = ctx_.annotations->label(*op.out);
+    return label.size() > 1 && label[0] == '&';
+  }
+
+  // Bookkeeping the machine does that the program did not ask for: keeping the
+  // stack pointer up to date, and pushing a return address as part of making a
+  // call. Both are real, both are already summarised elsewhere (the frame
+  // layout, the call itself), and shown in full they bury everything else --
+  // `RSP_122 = phi(RSP_79, RSP_121)` is not what anyone came to read.
+  bool is_plumbing(const SsaOp &op, const std::set<uint64_t> &call_addresses) const {
+    if (stack_pointer_.space == nullptr) return false;
+
+    // A write to the stack pointer itself.
+    if (op.out != nullptr && op.out->storage == stack_pointer_) return true;
+
+    // Or to a temporary that stack-vars worked out holds the stack pointer at
+    // a known offset -- `sp`, `sp-0x20`, `sp+0x8`. Sleigh routes the real
+    // update through one of these, so checking only the register misses half
+    // of the bookkeeping.
+    if (op.out != nullptr && ctx_.annotations != nullptr &&
+        is_frame_expression(ctx_.annotations->label(*op.out)))
+      return true;
+
+    // The return-address push, which shares the call instruction's address.
+    if (op.opc == ghidra::CPUI_STORE && call_addresses.count(op.addr.getOffset()) != 0)
+      return true;
+
+    return false;
   }
 
   static bool is_constant_def(const SsaOp &op) {
@@ -278,8 +359,10 @@ private:
     static const std::vector<Rewrite> table = {
         // The flag dance behind a signed compare: NG != OV over a
         // subtraction. Copy-skipping is what makes this expressible at all.
-        {op(CPUI_INT_NOTEQUAL, {op(CPUI_INT_SLESS, {val(0), imm(0)}),
-                                op(CPUI_INT_SBORROW, {val(1), val(2)})}),
+        // Either operand order: which flag lands on the left is an artefact of
+        // the lowering, not of the comparison.
+        {comm(CPUI_INT_NOTEQUAL, op(CPUI_INT_SLESS, {val(0), imm(0)}),
+              op(CPUI_INT_SBORROW, {val(1), val(2)})),
          &HilBuilder::signed_less},
 
         // A comparison done by subtracting and testing the result.
@@ -352,8 +435,11 @@ private:
       return operand(op, 0, depth + 1);
 
     if (const Operator *binop = binary_operator(op.opc); binop != nullptr && op.ins.size() == 2) {
-      return binary(binop->text, binop->precedence, operand(op, 0, depth + 1),
-                    operand(op, 1, depth + 1));
+      ExprRef left = operand(op, 0, depth + 1);
+      ExprRef right = operand(op, 1, depth + 1);
+      if (op.opc == ghidra::CPUI_INT_ADD || op.opc == ghidra::CPUI_INT_SUB)
+        return additive(binop->text, left, right);
+      return binary(binop->text, binop->precedence, left, right);
     }
 
     if (const char *unop = unary_operator(op.opc); unop != nullptr && op.ins.size() == 1) {
@@ -417,6 +503,10 @@ private:
     const BasicBlock &raw = fn_.cfg()[block];
 
     for (const SsaOp *phi : fn_[block].phis) {
+      if (hides_machine_state() && phi->out != nullptr &&
+          stack_pointer_.space != nullptr && phi->out->storage == stack_pointer_)
+        continue;
+
       Statement statement;
       statement.kind = StatementKind::Assign;
       statement.addr = phi->addr;
@@ -427,8 +517,18 @@ private:
       out.push_back(statement);
     }
 
+    // A call instruction lowers to the push of its own return address as well
+    // as the transfer: those ops share the call's address.
+    std::set<uint64_t> call_addresses;
+    for (const SsaOp *op : fn_[block].ops)
+      if (op->opc == ghidra::CPUI_CALL || op->opc == ghidra::CPUI_CALLIND ||
+          op->opc == ghidra::CPUI_RETURN)
+        call_addresses.insert(op->addr.getOffset());
+
     for (const SsaOp *op : fn_[block].ops) {
       if (op->out != nullptr && folds_into_its_use(*op->out)) continue;
+      if (hides_machine_state() && is_plumbing(*op, call_addresses)) continue;
+      if (defines_slot_address(*op)) continue;
       out.push_back(statement_for(*op, raw));
     }
   }
@@ -521,6 +621,7 @@ private:
   std::unordered_map<int, int> order_; // op id -> index in the current block
   std::set<int> observable_;
   std::unordered_map<int, std::string> temporaries_;
+  Storage stack_pointer_;
 };
 
 namespace {
@@ -559,6 +660,10 @@ void render(std::ostringstream &os, ExprRef expr, int parent_precedence) {
     break;
 
   case ExprKind::Load:
+    if (const std::string *slot = slot_name(expr->operands[0])) {
+      os << slot->substr(1);
+      break;
+    }
     os << '[';
     render(os, expr->operands[0], kLowest);
     os << ']';
@@ -596,7 +701,8 @@ std::string to_string(const Hil &hil, const SsaFunction &fn, const PassContext &
   for (const HilBlock &block : hil.blocks()) {
     const BasicBlock &raw = cfg[block.id];
 
-    os << "block " << block.id;
+    os << "block " << block.id << " @ 0x" << std::hex << raw.start.getOffset()
+       << std::dec;
     if (block.id == cfg.entry) os << " (entry)";
     if (!fn.dominance().reachable(block.id)) os << " (unreachable)";
     os << ":";
@@ -619,9 +725,13 @@ std::string to_string(const Hil &hil, const SsaFunction &fn, const PassContext &
         break;
 
       case StatementKind::Store:
-        line << '[';
-        render(line, statement.address, kLowest);
-        line << "] = ";
+        if (const std::string *slot = slot_name(statement.address)) {
+          line << slot->substr(1) << " = ";
+        } else {
+          line << '[';
+          render(line, statement.address, kLowest);
+          line << "] = ";
+        }
         render(line, statement.value, kLowest);
         break;
 

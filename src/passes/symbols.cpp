@@ -60,8 +60,11 @@ public:
         const std::string *symbol = lookup(ctx, op.ins[i].constant());
         if (symbol == nullptr) continue;
 
+        // The comment keeps the `&` to say this is the function's address;
+        // the *label* must not, because a leading `&` is how stack-vars marks
+        // a frame-slot address and the listing hides those definitions.
         ctx.annotations->comment(op, "&" + *symbol);
-        if (op.out != nullptr) ctx.annotations->set_label(*op.out, "&" + *symbol);
+        if (op.out != nullptr) ctx.annotations->set_label(*op.out, *symbol);
         ++named;
       }
     });

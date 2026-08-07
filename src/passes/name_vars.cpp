@@ -102,7 +102,13 @@ private:
     if (is_temporary(value.storage) && !ctx.annotations->has_label(value)) return 0;
     if (!seen_.insert(value.id).second) return 0;
 
-    ctx.annotations->set_display_name(value, unique(choose(value, ctx)));
+    const std::string name = choose(value, ctx);
+
+    // `&var_1c` names a stack slot's address. The same slot gets its address
+    // recomputed at every access, and those are all the one variable -- giving
+    // them separate names would invent variables the program does not have.
+    const bool is_slot_address = name.size() > 1 && name[0] == '&';
+    ctx.annotations->set_display_name(value, is_slot_address ? name : unique(name));
     return 1;
   }
 

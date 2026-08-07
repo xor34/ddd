@@ -25,6 +25,9 @@
 // CHECK: &var_18#0 = INT_ADD sp-0x20#1 0x8
 // CHECK: STORE ram &var_18#0 x0#in  ; store var_18 [sp-0x18]
 
-// The loaded value inherits the slot's name from `rename`.
+// The load is annotated with the slot it reads. Its *result* is deliberately
+// not renamed after the slot: the high-level listing writes the load as the
+// slot itself, so a name here would only pin down a value that should fold
+// into whatever reads it.
 // CHECK: 0x1008 ldr x1, [sp, #0x8]
-// CHECK: var_18#0 = LOAD ram &var_18#1  ; load var_18 [sp-0x18]
+// CHECK: = LOAD ram &var_18#1  ; load var_18 [sp-0x18]

@@ -85,12 +85,15 @@ ABSL_FLAG(std::string, transform, "",
           "Run the image through this script before analysing it (decryption, "
           "unpacking)");
 
+ABSL_FLAG(bool, show_machine_state, false,
+          "Show stack-pointer updates and the return-address push a call "
+          "performs, which the high-level listing hides");
 ABSL_FLAG(bool, disasm, false, "Print disassembly before lifting");
 ABSL_FLAG(bool, cfg, false, "Print the raw p-code CFG before lifting");
 ABSL_FLAG(bool, list_passes, false,
           "List the registered passes and extractors, then exit");
 ABSL_FLAG(std::vector<std::string>, passes,
-          std::vector<std::string>({"stack-vars", "dce", "idioms",
+          std::vector<std::string>({"stack-vars", "simplify", "dce", "idioms",
                                     "data-refs", "symbols", "rename",
                                     "name-vars", "calling-conv", "hil"}),
           "Passes to run over each region. Ends in `hil` for the readable "
@@ -236,11 +239,19 @@ referenced_functions(const ddd::Cfg &cfg,
 }
 
 int list_functions(const ddd::ElfInfo &elf) {
-  for (const auto &entry : elf.functions)
+  // A C++ function is registered under both its mangled and its demangled
+  // spelling so either selects it, but listing both would double the output
+  // and show the unreadable one for no reason.
+  int shown = 0;
+  for (const auto &entry : elf.functions) {
+    if (entry.first != entry.second.name) continue;
+
     std::cout << "  0x" << std::hex << entry.second.begin << std::dec << "  "
               << (entry.second.end - entry.second.begin) << "\t" << entry.first
               << "\n";
-  std::cout << elf.functions.size() << " function(s)\n";
+    ++shown;
+  }
+  std::cout << shown << " function(s)\n";
   return 0;
 }
 
@@ -345,6 +356,7 @@ void analyse(const Lifted &lifted, const ddd::Image &image,
   ctx.symbols = symbols;
   ctx.out = &std::cout;
   ctx.verbose = true;
+  ctx.show_machine_state = absl::GetFlag(FLAGS_show_machine_state);
   manager.run(fn, ctx);
 }
 
