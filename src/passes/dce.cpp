@@ -34,6 +34,7 @@ public:
 
   void run(SsaFunction &fn, PassContext &ctx) override {
     const std::set<int> roots = observable_values(fn, ctx);
+    annotations_ = ctx.annotations;
     if (roots.empty() && ctx.verbose)
       ctx.stream() << "  no calling convention: nothing is treated as live at exit\n";
 
@@ -56,7 +57,7 @@ public:
   }
 
 private:
-  static int sweep(std::vector<SsaOp *> &ops, const std::set<int> &roots, bool &changed) {
+  int sweep(std::vector<SsaOp *> &ops, const std::set<int> &roots, bool &changed) const {
     auto dead = std::remove_if(ops.begin(), ops.end(), [&](const SsaOp *op) {
       return is_dead(*op, roots);
     });
@@ -68,8 +69,20 @@ private:
     return removed;
   }
 
-  static bool is_dead(const SsaOp &op, const std::set<int> &roots) {
-    if (has_side_effects(op.opc)) return false;
+  // A load whose address stack-vars resolved to a frame slot is an ordinary
+  // read of the function's own memory. The blanket "a load might be a device
+  // register" rule does not apply to it, and without this exception an
+  // `add [rbp-0xc], eax` leaves half a dozen dead loads in the listing.
+  bool is_stack_load(const SsaOp &op) const {
+    if (op.opc != ghidra::CPUI_LOAD || op.ins.size() < 2) return false;
+    if (annotations_ == nullptr || !op.ins[1].is_tracked()) return false;
+
+    const std::string &label = annotations_->label(*op.ins[1].value);
+    return !label.empty() && label[0] == '&';
+  }
+
+  bool is_dead(const SsaOp &op, const std::set<int> &roots) const {
+    if (has_side_effects(op.opc) && !is_stack_load(op)) return false;
 
     // A write to storage we chose not to rename (memory) is not tracked by
     // def-use chains, so there is no evidence it is unread.
@@ -82,6 +95,8 @@ private:
     if (!op.out->uses.empty()) return false;
     return roots.count(op.out->id) == 0;
   }
+
+  const Annotations *annotations_ = nullptr;
 };
 
 DDD_REGISTER_PASS(Dce);

@@ -46,6 +46,16 @@ const SsaValue &Annotations::canonical(const SsaValue &value) const {
   return *current;
 }
 
+void Annotations::set_display_name(const SsaValue &value, std::string name) {
+  display_names_[value.id] = std::move(name);
+}
+
+const std::string &Annotations::display_name(const SsaValue &value) const {
+  static const std::string none;
+  auto it = display_names_.find(value.id);
+  return it == display_names_.end() ? none : it->second;
+}
+
 const std::vector<std::string> &Annotations::comments(const SsaOp &op) const {
   auto it = op_comments_.find(op.id);
   return it == op_comments_.end() ? no_comments() : it->second;
@@ -67,6 +77,7 @@ void Annotations::clear() {
   block_comments_.clear();
   labels_.clear();
   aliases_.clear();
+  display_names_.clear();
 }
 
 } // namespace ddd

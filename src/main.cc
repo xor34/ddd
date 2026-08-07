@@ -6,6 +6,7 @@
 //   --region=0x400:0x800:riscv64
 #include "annotations.h"
 #include "cfg.h"
+#include "elf.h"
 #include "extract.h"
 #include "image.h"
 #include "pass.h"
@@ -20,7 +21,10 @@
 #include <cctype>
 #include <cstdint>
 #include <fstream>
+#include <deque>
+#include <map>
 #include <iostream>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,6 +51,20 @@ ABSL_FLAG(std::string, abi, "",
 ABSL_FLAG(std::string, sp, "",
           "Stack pointer register (default: from the calling convention)");
 ABSL_FLAG(std::string, specs, "specs", "Directory to resolve spec names in");
+ABSL_FLAG(std::vector<std::string>, function, {},
+          "Comma-separated function names to analyse, each bounded by its "
+          "symbol. Needs a container with a symbol table.");
+ABSL_FLAG(bool, functions, false,
+          "List the functions the container knows about, then exit");
+ABSL_FLAG(int, follow, 8,
+          "Also analyse up to this many functions reached from the ones asked "
+          "for, by call or by function pointer. 0 analyses only what was asked "
+          "for.");
+ABSL_FLAG(bool, whole_segment, false,
+          "Analyse entire executable segments rather than individual "
+          "functions, even when symbols are available");
+ABSL_FLAG(bool, raw, false,
+          "Treat the file as a flat image even if it is a recognised container");
 
 ABSL_FLAG(
     std::vector<std::string>, region, {},
@@ -72,9 +90,9 @@ ABSL_FLAG(bool, cfg, false, "Print the raw p-code CFG before lifting");
 ABSL_FLAG(bool, list_passes, false,
           "List the registered passes and extractors, then exit");
 ABSL_FLAG(std::vector<std::string>, passes,
-          std::vector<std::string>({"prune-phis", "dce", "stack-vars", "idioms",
-                                    "data-refs", "rename", "calling-conv",
-                                    "hil"}),
+          std::vector<std::string>({"stack-vars", "dce", "idioms",
+                                    "data-refs", "symbols", "rename",
+                                    "name-vars", "calling-conv", "hil"}),
           "Passes to run over each region. Ends in `hil` for the readable "
           "expression form; swap it for `print-ssa` to see one line per p-code "
           "op. py:<path> runs an external script.");
@@ -121,6 +139,109 @@ std::vector<uint8_t> read_file(const std::string &path, bool &ok) {
   ok = true;
   return std::vector<uint8_t>(std::istreambuf_iterator<char>(file),
                               std::istreambuf_iterator<char>());
+}
+
+// A bare spec name resolves in the specs directory; a path is taken as given.
+std::string resolve_spec(const std::string &spec, const std::string &spec_dir) {
+  if (spec.size() >= 4 && spec.compare(spec.size() - 4, 4, ".sla") == 0) return spec;
+  return spec_dir + "/" + spec + ".sla";
+}
+
+// Which stretches of an ELF to lift.
+//
+// An executable segment is not a function -- it is every function in the
+// binary laid end to end. Sweeping one linearly from the entry point produces
+// a single "function" containing all of them, which is what happens without
+// this. When the symbol table says where the functions are, use it.
+//
+// Returns empty (having explained why) when there is nothing to do.
+std::vector<ddd::ElfRange> choose_ranges(ddd::ElfInfo &elf) {
+  const std::vector<std::string> wanted = absl::GetFlag(FLAGS_function);
+
+  if (!wanted.empty()) {
+    std::vector<ddd::ElfRange> chosen;
+    for (const std::string &name : wanted) {
+      auto it = elf.functions.find(name);
+      if (it == elf.functions.end()) {
+        std::cerr << "no sized function symbol named " << name
+                  << " (--functions lists them)\n";
+        return {};
+      }
+      chosen.push_back(it->second);
+    }
+    elf.entry = chosen.front().begin;
+    return chosen;
+  }
+
+  std::vector<ddd::ElfRange> executable;
+  for (const ddd::ElfRange &range : elf.ranges)
+    if (range.executable) executable.push_back(range);
+
+  if (absl::GetFlag(FLAGS_whole_segment) || elf.functions.empty()) {
+    if (executable.empty())
+      std::cerr << "ELF has no executable range to analyse\n";
+    return executable;
+  }
+
+  // No function named: the one execution starts in is the sensible default,
+  // and the rest are a --function away.
+  for (const auto &entry : elf.functions) {
+    const ddd::ElfRange &range = entry.second;
+    if (elf.entry < range.begin || elf.entry >= range.end) continue;
+
+    std::cerr << elf.functions.size() << " functions; analysing " << entry.first
+              << " at the entry point. --function=NAME for another, --functions "
+                 "to list them, --whole_segment for the lot.\n";
+    return {range};
+  }
+
+  std::cerr << elf.functions.size()
+            << " functions, none containing the entry point; analysing the "
+               "whole segment. --function=NAME picks one.\n";
+  return executable;
+}
+
+// Addresses this code refers to that are the start of a known function:
+// direct call destinations, and constants that land on one -- which is how a
+// function pointer is passed.
+//
+// PLT stubs are skipped: a stub is three instructions of jump, and following
+// every one of them would spend the whole budget on trampolines.
+std::vector<uint64_t>
+referenced_functions(const ddd::Cfg &cfg,
+                     const std::map<uint64_t, const ddd::ElfRange *> &functions) {
+  std::vector<uint64_t> found;
+
+  auto consider = [&](uint64_t address) {
+    auto it = functions.find(address);
+    if (it == functions.end()) return;
+    if (address >= cfg.code_begin && address < cfg.code_end) return; // ourselves
+
+    const std::string &name = it->second->name;
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, "@plt") == 0) return;
+    found.push_back(address);
+  };
+
+  for (const ddd::BasicBlock &block : cfg.blocks) {
+    for (const ddd::PcodeOp &op : block.ops) {
+      if (op.opc == ghidra::CPUI_CALL && !op.inputs.empty())
+        consider(op.inputs[0].offset);
+
+      for (const ddd::VarnodeData &in : op.inputs)
+        if (ddd::is_constant(in)) consider(in.offset);
+    }
+  }
+
+  return found;
+}
+
+int list_functions(const ddd::ElfInfo &elf) {
+  for (const auto &entry : elf.functions)
+    std::cout << "  0x" << std::hex << entry.second.begin << std::dec << "  "
+              << (entry.second.end - entry.second.begin) << "\t" << entry.first
+              << "\n";
+  std::cout << elf.functions.size() << " function(s)\n";
+  return 0;
 }
 
 int list_passes() {
@@ -175,7 +296,9 @@ int run_extractors(const ddd::Image &image) {
 // One region, lifted. Heap-allocated because the SsaFunction borrows the Cfg
 // sitting next to it.
 struct Lifted {
-  const ddd::Region *region = nullptr;
+  // By value, not by pointer: regions are discovered as the analysis follows
+  // references, so there is no stable container to point into.
+  ddd::Region region;
   ddd::Cfg cfg;
 };
 
@@ -194,7 +317,7 @@ std::unique_ptr<Lifted> lift(const ddd::Region &region, uint64_t entry) {
   limits.end = ghidra::Address(translator.getDefaultCodeSpace(), region.end);
 
   auto lifted = std::make_unique<Lifted>();
-  lifted->region = &region;
+  lifted->region = region;
   lifted->cfg = ddd::build_cfg(translator, start, limits);
   return lifted->cfg.empty() ? nullptr : std::move(lifted);
 }
@@ -202,8 +325,9 @@ std::unique_ptr<Lifted> lift(const ddd::Region &region, uint64_t entry) {
 // Each region gets a fresh Annotations: what one region's analysis concluded
 // says nothing about another's.
 void analyse(const Lifted &lifted, const ddd::Image &image,
-             const ddd::PassManager &manager) {
-  const ddd::Region &region = *lifted.region;
+             const ddd::PassManager &manager,
+             const std::map<uint64_t, std::string> *symbols) {
+  const ddd::Region &region = lifted.region;
   std::cout << "\n=== region 0x" << std::hex << region.begin << "-0x"
             << region.end << std::dec << "  " << region.name << " ===\n";
 
@@ -218,6 +342,7 @@ void analyse(const Lifted &lifted, const ddd::Image &image,
   ctx.target = region.target;
   ctx.image = &image;
   ctx.annotations = &annotations;
+  ctx.symbols = symbols;
   ctx.out = &std::cout;
   ctx.verbose = true;
   manager.run(fn, ctx);
@@ -272,8 +397,32 @@ int main(int argc, char **argv) {
   ghidra::AttributeId::initialize();
   ghidra::ElementId::initialize();
 
-  const uint64_t base = absl::GetFlag(FLAGS_base);
-  ddd::Image image(base, std::move(bytes));
+  uint64_t base = absl::GetFlag(FLAGS_base);
+
+  // A container knows what a flat image can only be told: where the code is,
+  // what address it loads at, which architecture it is for, and where
+  // execution starts. Ask it before falling back to the flags.
+  ddd::ElfInfo elf;
+  if (!absl::GetFlag(FLAGS_raw) && ddd::looks_like_elf(bytes)) {
+    elf = ddd::parse_elf(bytes);
+    if (!elf.ok) {
+      std::cerr << "ELF: " << elf.error << " (use --raw to read it flat)\n";
+      return 1;
+    }
+    std::cout << elf.describe() << "\n";
+  }
+
+  ddd::Image image = elf.ok ? ddd::load_elf(bytes, elf)
+                            : ddd::Image(base, std::move(bytes));
+  if (elf.ok) base = image.base();
+
+  if (absl::GetFlag(FLAGS_functions)) {
+    if (!elf.ok) {
+      std::cerr << "no container with a symbol table here\n";
+      return 2;
+    }
+    return list_functions(elf);
+  }
 
   if (absl::GetFlag(FLAGS_extract))
     return run_extractors(image);
@@ -289,7 +438,35 @@ int main(int argc, char **argv) {
     regions.push_back(region);
   }
 
-  // No explicit regions: the whole image is one, with --sla.
+  // An ELF's executable ranges are regions already, with the spec its
+  // e_machine names -- so `--file=a.out` needs no other flags at all.
+  if (regions.empty() && elf.ok) {
+    const std::string spec =
+        !absl::GetFlag(FLAGS_sla).empty() ? absl::GetFlag(FLAGS_sla) : elf.spec;
+    if (spec.empty()) {
+      std::cerr << "no spec known for this ELF machine; pass --sla or --region\n";
+      return 2;
+    }
+
+    std::vector<ddd::ElfRange> wanted = choose_ranges(elf);
+    if (wanted.empty()) return 2;
+
+    for (const ddd::ElfRange &range : wanted) {
+      ddd::Region region;
+      region.begin = range.begin;
+      region.end = range.end;
+      region.kind = ddd::RegionKind::Code;
+      region.target = targets.acquire(
+          resolve_spec(spec, spec_dir), absl::GetFlag(FLAGS_abi),
+          absl::GetFlag(FLAGS_sp), absl::GetFlag(FLAGS_ctx));
+      if (region.target == nullptr)
+        return 1;
+      region.name = range.name + " (" + region.target->name + ")";
+      regions.push_back(region);
+    }
+  }
+
+  // No container and no explicit regions: the whole image is one, with --sla.
   if (regions.empty()) {
     const std::string spec = absl::GetFlag(FLAGS_sla);
     if (spec.empty()) {
@@ -330,18 +507,53 @@ int main(int argc, char **argv) {
   // regions nominally span -- is the code range, and the rest of the image is
   // the data that data-refs resolves pointers into. A region bounded by --max
   // stops well short of its own end.
-  const uint64_t entry = absl::GetFlag(FLAGS_entry);
+  uint64_t entry = absl::GetFlag(FLAGS_entry);
+  if (entry == 0 && elf.ok && elf.entry != 0) entry = elf.entry;
   std::vector<std::unique_ptr<Lifted>> lifted;
 
-  for (const ddd::Region &region : regions) {
+  // Functions reachable from the ones asked for. A listing that mentions
+  // `&main` and then never shows main is not much use, and following the
+  // references is how the rest of the binary gets found -- the sweep inside a
+  // function never leaves it.
+  std::map<uint64_t, const ddd::ElfRange *> by_address;
+  for (const auto &function : elf.functions)
+    by_address.emplace(function.second.begin, &function.second);
+
+  std::set<uint64_t> queued;
+  for (const ddd::Region &region : regions) queued.insert(region.begin);
+
+  int budget = absl::GetFlag(FLAGS_follow);
+  std::deque<ddd::Region> pending(regions.begin(), regions.end());
+
+  while (!pending.empty()) {
+    const ddd::Region region = pending.front();
+    pending.pop_front();
+
     if (region.kind == ddd::RegionKind::Data || region.target == nullptr)
       continue;
 
-    std::unique_ptr<Lifted> one = lift(region, regions.size() == 1 ? entry : 0);
+    // Start at the entry point when it falls inside this region; otherwise
+    // sweep the region from its beginning.
+    const bool has_entry = entry >= region.begin && entry < region.end;
+    std::unique_ptr<Lifted> one = lift(region, has_entry ? entry : 0);
     if (one == nullptr) {
       std::cout << "nothing could be disassembled in " << region.name << '\n';
       continue;
     }
+
+    for (uint64_t target : referenced_functions(one->cfg, by_address)) {
+      if (budget <= 0) break;
+      if (!queued.insert(target).second) continue;
+
+      const ddd::ElfRange &range = *by_address[target];
+      ddd::Region next = region; // same target: same ISA and convention
+      next.begin = range.begin;
+      next.end = range.end;
+      next.name = range.name + " (" + region.target->name + ")";
+      pending.push_back(next);
+      --budget;
+    }
+
     lifted.push_back(std::move(one));
   }
 
@@ -355,10 +567,24 @@ int main(int argc, char **argv) {
     code_begin = std::min(code_begin, one->cfg.code_begin);
     code_end = std::max(code_end, one->cfg.code_end);
   }
+
+  // When the container said which bytes are executable, believe it over the
+  // sweep. Analysing one function does not make the rest of .text into data,
+  // and calling a pointer to another function "data" invites data-refs to
+  // read instructions as though they were a number.
+  for (const ddd::ElfRange &range : elf.ranges) {
+    if (!range.executable) continue;
+    code_begin = std::min(code_begin, range.begin);
+    code_end = std::max(code_end, range.end);
+  }
+
   image.set_code_range(code_begin, code_end);
 
+  // Symbols are the one naming in this tool that is not a guess, so they come
+  // straight from the container when there was one.
+  const std::map<uint64_t, std::string> *symbols = elf.ok ? &elf.symbols : nullptr;
   for (const std::unique_ptr<Lifted> &one : lifted)
-    analyse(*one, image, manager);
+    analyse(*one, image, manager, symbols);
 
   return 0;
 }

@@ -7,9 +7,9 @@
 // from.
 //
 // RUN: %lift --arch=aarch64 --sla=AARCH64 %s --passes=print-ssa \
-// RUN:   | FileCheck --check-prefix=SSA %s
+// RUN:   | FileCheck --check-prefix=PCODE %s
 // RUN: %lift --arch=aarch64 --sla=AARCH64 %s \
-// RUN:   --passes=prune-phis,dce,idioms,rename,calling-conv,hil | FileCheck %s
+// RUN:   --passes=dce,idioms,rename,calling-conv,hil | FileCheck %s
 
   mov  x0, #5
   cmp  x0, #10
@@ -23,13 +23,13 @@ Ldone:
 
 // The comparison arrives as a flag computation spread over several ops, none
 // of which says "less than".
-// SSA: INT_SBORROW
-// SSA: INT_SLESS
-// SSA: INT_NOTEQUAL
+// PCODE: INT_SBORROW
+// PCODE: INT_SLESS
+// PCODE: INT_NOTEQUAL
 
 // The rewrite table matches that whole shape through the copies between the
 // flags and the test, and prints what the source said.
-// CHECK: cond#0 = 0x5 <s 0xa
+// CHECK: cond = 0x5 <s 0xa
 // CHECK-SAME: signed <
 
 // Control flow reads as control flow rather than a CBRANCH on a temporary.

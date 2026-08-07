@@ -9,9 +9,11 @@
 // result and survives. Catching those needs an SCC-based sweep, or real
 // liveness-based (pruned) placement in build_ssa.
 #include "../pass.h"
+#include "../reaching.h"
 
 #include <algorithm>
 #include <ostream>
+#include <set>
 
 namespace ddd {
 namespace {
@@ -24,6 +26,11 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
+    // A phi holding the value the caller will read has no uses inside the
+    // function and is exactly what the function computes. `dce` learned this
+    // the same way; without it, deleting the phi makes everything feeding it
+    // dead too, and the function empties out.
+    const std::set<int> roots = observable_values(fn, ctx);
     int removed = 0;
 
     for (bool changed = true; changed;) {
@@ -31,8 +38,9 @@ public:
 
       for (SsaBlock &block : fn.blocks()) {
         auto dead = std::remove_if(
-            block.phis.begin(), block.phis.end(), [](const SsaOp *phi) {
-              return phi->out != nullptr && phi->out->uses.empty();
+            block.phis.begin(), block.phis.end(), [&roots](const SsaOp *phi) {
+              return phi->out != nullptr && phi->out->uses.empty() &&
+                     roots.count(phi->out->id) == 0;
             });
         if (dead == block.phis.end())
           continue;

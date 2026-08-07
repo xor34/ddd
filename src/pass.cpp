@@ -41,6 +41,13 @@ std::ostream &PassContext::stream() const {
 
 std::string PassContext::name_of(const SsaValue &value) const {
   if (annotations == nullptr) return declaration_of(value);
+
+  // A complete name from `name-vars` is the whole answer: it already folded in
+  // the version and is already unique. Anything written afterwards -- a call's
+  // argument list, say -- then agrees with the listing rather than quoting SSA
+  // names nothing else shows.
+  if (annotations->has_display_name(value)) return annotations->display_name(value);
+
   return declaration_of(annotations->canonical(value));
 }
 

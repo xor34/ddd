@@ -49,6 +49,20 @@ public:
   const std::string &label(const SsaValue &value) const;
   bool has_label(const SsaValue &value) const { return !label(value).empty(); }
 
+  // A *complete* variable name, versions and all folded in -- what the
+  // high-level listing calls this value.
+  //
+  // Separate from a label because the two views want different things. The SSA
+  // listing needs `var_18#0` and `var_18#1` to stay distinguishable, so a
+  // label names only the storage part and the version is still appended. The
+  // folded listing has no versions in it, so its names must already be unique
+  // on their own; `name-vars` is what makes them so.
+  void set_display_name(const SsaValue &value, std::string name);
+  const std::string &display_name(const SsaValue &value) const;
+  bool has_display_name(const SsaValue &value) const {
+    return !display_name(value).empty();
+  }
+
   void clear();
 
 private:
@@ -56,6 +70,7 @@ private:
   std::map<int, std::vector<std::string>> block_comments_;
   std::map<int, std::string> labels_;
   std::map<int, const SsaValue *> aliases_;
+  std::map<int, std::string> display_names_;
 };
 
 } // namespace ddd

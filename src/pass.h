@@ -12,8 +12,10 @@
 #include "ssa.h"
 #include "target.h"
 
+#include <cstdint>
 #include <functional>
 #include <iosfwd>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,7 +35,10 @@ struct PassContext {
   const Target *target = nullptr;     // ISA + ABI in force here; may be null
   const Image *image = nullptr;       // the bytes, code and data; may be null
   Annotations *annotations = nullptr; // where passes record what they found
-  std::ostream *out = nullptr;        // where passes report; defaults to stdout
+  // Function addresses to names, when the container carried a symbol table.
+  // The only naming in this tool that is not a guess.
+  const std::map<uint64_t, std::string> *symbols = nullptr;
+  std::ostream *out = nullptr; // where passes report; defaults to stdout
   bool verbose = false;
 
   ghidra::Sleigh *translator() const;

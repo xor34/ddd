@@ -177,6 +177,11 @@ private:
   }
 
   std::string display_name(const SsaValue &value) {
+    // A name chosen for this listing wins outright -- it is already complete
+    // and already unique.
+    if (ctx_.annotations != nullptr && ctx_.annotations->has_display_name(value))
+      return ctx_.annotations->display_name(value);
+
     // A Sleigh temporary's address within the unique space says nothing to a
     // reader -- `unique:0x7b000:8#2` is just a serial number written the long
     // way. Number them in the order they turn up instead.
@@ -257,87 +262,84 @@ private:
   // ---- the rewrite table -------------------------------------------------
 
   // Matched against the def-use graph, following COPY chains, so a rule
-  // describes the computation rather than the lowering. Each returns null to
-  // decline.
-  ExprRef rewrite(const SsaOp &op, int depth) {
+  // describes the computation rather than the lowering. First match wins.
+  //
+  // Each rule builds its replacement from the captured slots, so adding one is
+  // a pattern and a lambda -- there is no per-rule boilerplate to copy.
+  struct Rewrite {
+    Pattern pattern;
+    ExprRef (HilBuilder::*build)(const Match &, const SsaOp &, int);
+  };
+
+  static const std::vector<Rewrite> &rewrites() {
     using namespace ddd::pat;
+    using namespace ghidra;
 
-    // A compare-and-test pair: the architecture computes flags, then combines
-    // them. `NG != OV` over a subtraction is a signed less-than, and that is
-    // what the source said.
-    {
-      static const Pattern signed_less =
-          op_(ghidra::CPUI_INT_NOTEQUAL,
-              {op_(ghidra::CPUI_INT_SLESS, {val(0), imm(0)}),
-               op_(ghidra::CPUI_INT_SBORROW, {val(1), val(2)})});
-      Match m;
-      if (signed_less.match(op, m))
-        return compare("<s", kRelational, *m.values[1], *m.values[2], depth);
-    }
+    static const std::vector<Rewrite> table = {
+        // The flag dance behind a signed compare: NG != OV over a
+        // subtraction. Copy-skipping is what makes this expressible at all.
+        {op(CPUI_INT_NOTEQUAL, {op(CPUI_INT_SLESS, {val(0), imm(0)}),
+                                op(CPUI_INT_SBORROW, {val(1), val(2)})}),
+         &HilBuilder::signed_less},
 
-    // Equality through a subtraction: `(a - b) == 0` is `a == b`.
-    {
-      static const Pattern equal =
-          op_(ghidra::CPUI_INT_EQUAL,
-              {op_(ghidra::CPUI_INT_SUB, {val(0), val(1)}), imm(0)});
-      Match m;
-      if (equal.match(op, m))
-        return compare("==", kEquality, *m.values[0], *m.values[1], depth);
-    }
-    {
-      static const Pattern not_equal =
-          op_(ghidra::CPUI_INT_NOTEQUAL,
-              {op_(ghidra::CPUI_INT_SUB, {val(0), val(1)}), imm(0)});
-      Match m;
-      if (not_equal.match(op, m))
-        return compare("!=", kEquality, *m.values[0], *m.values[1], depth);
-    }
+        // A comparison done by subtracting and testing the result.
+        {op(CPUI_INT_EQUAL, {op(CPUI_INT_SUB, {val(0), val(1)}), imm(0)}),
+         &HilBuilder::sub_equal},
+        {op(CPUI_INT_NOTEQUAL, {op(CPUI_INT_SUB, {val(0), val(1)}), imm(0)}),
+         &HilBuilder::sub_not_equal},
 
-    // `!(x == 0)` is `x != 0`.
-    {
-      static const Pattern nonzero =
-          op_(ghidra::CPUI_BOOL_NEGATE, {op_(ghidra::CPUI_INT_EQUAL, {val(0), imm(0)})});
-      Match m;
-      if (nonzero.match(op, m)) {
-        ++hil_.rewritten_;
-        return binary("!=", kEquality, value_of(*m.values[0], depth + 1), constant(0, 0));
-      }
-    }
+        // !(x == 0) is x != 0.
+        {op(CPUI_BOOL_NEGATE, {op(CPUI_INT_EQUAL, {val(0), imm(0)})}),
+         &HilBuilder::not_zero},
 
-    // Self-cancelling arithmetic: the idiomatic register zeroing.
-    {
-      static const Pattern zero_xor = op_(ghidra::CPUI_INT_XOR, {val(0), val(0)});
-      static const Pattern zero_sub = op_(ghidra::CPUI_INT_SUB, {val(0), val(0)});
-      Match m;
-      if (zero_xor.match(op, m) || zero_sub.match(op, m)) {
-        ++hil_.rewritten_;
-        return constant(0, op.out != nullptr ? op.out->storage.size : 0);
-      }
-    }
+        // Self-cancelling arithmetic: the idiomatic register zeroing.
+        {op(CPUI_INT_XOR, {val(0), val(0)}), &HilBuilder::always_zero},
+        {op(CPUI_INT_SUB, {val(0), val(0)}), &HilBuilder::always_zero},
+        {comm(CPUI_INT_AND, val(0), imm(0)), &HilBuilder::always_zero},
+        {comm(CPUI_INT_MULT, val(0), imm(0)), &HilBuilder::always_zero},
 
-    // `x & x` and `x | x` are x.
-    {
-      static const Pattern same_and = op_(ghidra::CPUI_INT_AND, {val(0), val(0)});
-      static const Pattern same_or = op_(ghidra::CPUI_INT_OR, {val(0), val(0)});
-      Match m;
-      if (same_and.match(op, m) || same_or.match(op, m)) {
-        ++hil_.rewritten_;
-        return value_of(*m.values[0], depth + 1);
-      }
-    }
+        // Operations that are their own operand.
+        {op(CPUI_INT_AND, {val(0), val(0)}), &HilBuilder::first_operand},
+        {op(CPUI_INT_OR, {val(0), val(0)}), &HilBuilder::first_operand},
+        {comm(CPUI_INT_ADD, val(0), imm(0)), &HilBuilder::first_operand},
+    };
+    return table;
+  }
 
+  ExprRef rewrite(const SsaOp &op, int depth) {
+    for (const Rewrite &rule : rewrites()) {
+      Match m;
+      if (!rule.pattern.match(op, m)) continue;
+
+      ++hil_.rewritten_;
+      return (this->*rule.build)(m, op, depth);
+    }
     return nullptr;
   }
 
-  ExprRef compare(const char *text, int precedence, const SsaValue &left,
-                  const SsaValue &right, int depth) {
-    ++hil_.rewritten_;
-    return binary(text, precedence, value_of(left, depth + 1), value_of(right, depth + 1));
+  ExprRef signed_less(const Match &m, const SsaOp &, int depth) {
+    return compare("<s", kRelational, m, 1, 2, depth);
+  }
+  ExprRef sub_equal(const Match &m, const SsaOp &, int depth) {
+    return compare("==", kEquality, m, 0, 1, depth);
+  }
+  ExprRef sub_not_equal(const Match &m, const SsaOp &, int depth) {
+    return compare("!=", kEquality, m, 0, 1, depth);
+  }
+  ExprRef not_zero(const Match &m, const SsaOp &, int depth) {
+    return binary("!=", kEquality, value_of(*m.value(0), depth + 1), constant(0, 0));
+  }
+  ExprRef always_zero(const Match &, const SsaOp &op, int) {
+    return constant(0, op.out != nullptr ? op.out->storage.size : 0);
+  }
+  ExprRef first_operand(const Match &m, const SsaOp &, int depth) {
+    return value_of(*m.value(0), depth + 1);
   }
 
-  // pat::op is shadowed by the `op` parameter name in rewrite(), so alias it.
-  static Pattern op_(OpCode opc, std::vector<Pattern> ins) {
-    return pat::op(opc, std::move(ins));
+  ExprRef compare(const char *text, int precedence, const Match &m, int left,
+                  int right, int depth) {
+    return binary(text, precedence, value_of(*m.value(left), depth + 1),
+                  value_of(*m.value(right), depth + 1));
   }
 
   // ---- one op as an expression ------------------------------------------
@@ -369,6 +371,19 @@ private:
       expr.precedence = kPrimary;
       expr.size = op.out != nullptr ? op.out->storage.size : 0;
       expr.text = std::string(cast) + "." + std::to_string(expr.size);
+      expr.operands = {operand(op, 0, depth + 1)};
+      return make(std::move(expr));
+    }
+
+    // SUBPIECE(x, 0) keeps the low bytes: that is a truncating cast, and
+    // reads as one.
+    if (op.opc == ghidra::CPUI_SUBPIECE && op.ins.size() == 2 &&
+        op.ins[1].is_constant() && op.ins[1].constant() == 0) {
+      Expr expr;
+      expr.kind = ExprKind::Cast;
+      expr.precedence = kPrimary;
+      expr.size = op.out != nullptr ? op.out->storage.size : 0;
+      expr.text = "trunc." + std::to_string(expr.size);
       expr.operands = {operand(op, 0, depth + 1)};
       return make(std::move(expr));
     }

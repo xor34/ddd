@@ -1,0 +1,100 @@
+# An ELF answers, from the file itself, everything a flat image has to be told:
+# where the code is, what address it loads at, which architecture it is for,
+# where execution starts, and what the functions are called.
+#
+# Everything below comes from the container -- no --sla, --base or --region.
+#
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'static int helper(int a, int b) { return a * b + 7; }' > %t/p.c
+# RUN: echo 'int compute(int n) { int t = 0; for (int i = 0; i < n; i++) t += helper(i, n); return t; }' >> %t/p.c
+# RUN: echo 'int main(void) { return compute(5); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --function=helper | FileCheck %s
+
+# The header alone gives the architecture and the entry point.
+# CHECK: ELF 64-bit LE x86-64 (spec x86-64)
+# CHECK-SAME: function symbol(s)
+
+# --function bounds the sweep by the symbol's size. Without that a linear
+# sweep has no idea where a function ends and runs into the next one.
+# CHECK: === region 0x{{[0-9a-f]+}}-0x{{[0-9a-f]+}}  helper (x86-64) ===
+
+# The name is not a guess -- it came from .symtab. These are block comments
+# from three different passes, so DAG: their order is a pipeline artefact.
+# CHECK-DAG: ; function: helper
+# CHECK-DAG: ; return address: pushed by the call, at the entry sp
+# The spilled parameters become named frame slots, and the convention knows
+# which of them is the pushed return address.
+# CHECK-DAG: ; frame:{{.*}}retaddr[8]
+
+# a * b + 7, in one expression.
+# CHECK: trunc.4(sx.8(var_{{[0-9a-f_]+}}) * sx.8(var_{{[0-9a-f_]+}})) + 0x7
+
+# Only the one function was swept, so nothing after it shows up.
+# CHECK-NOT: unreachable
+
+
+# A direct call resolves to the symbol it targets.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --function=compute \
+# RUN:   | FileCheck --check-prefix=CALL %s
+
+# CALL: ; function: compute
+# Matched as one line rather than split across two directives -- the word
+# "call" also appears in the block comment about the return address, and a
+# split match would land there first.
+# CALL: call ram:0x{{[0-9a-f]+}}:8  ; calls helper
+
+# The loop body reads as the source did: one accumulate, one increment.
+# CALL: [&var_{{[0-9a-f_]+}}] = var_{{[0-9a-f_]+}} + EAX
+# CALL: [&var_{{[0-9a-f_]+}}] = var_{{[0-9a-f_]+}} + 0x1
+
+
+# With symbols and no --function, the default is the function at the entry
+# point -- not the whole executable segment, which is every function in the
+# binary laid end to end.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs 2>&1 | FileCheck --check-prefix=ENTRY %s
+
+# ENTRY: functions; analysing _start at the entry point
+# The region is the symbol's extent, a few dozen bytes, not all of .text.
+# ENTRY: === region 0x{{[0-9a-f]+}}-0x{{[0-9a-f]+}}  _start (x86-64) ===
+
+# _start opens with endbr64, which lowers to no p-code at all -- so the entry
+# block starts four bytes in and the symbol must be looked up by where the
+# sweep began, not by where the first op landed.
+# ENTRY: ; function: _start
+
+# The pointer handed to __libc_start_main is a function, not data.
+# ENTRY: = 0x{{[0-9a-f]+}}  ; &main
+
+
+# --whole_segment takes the segment instead, for a stripped binary or when the
+# symbols are not to be trusted.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --whole_segment --max=4 2>&1 \
+# RUN:   | FileCheck --check-prefix=SEGMENT %s
+
+# SEGMENT: === region 0x{{[0-9a-f]+}}-0x{{[0-9a-f]+}}  segment{{[0-9]+}} (x86-64) ===
+
+
+# A call to an imported function goes to a PLT stub, not to the function, so
+# without the relocations every library call reads as `call 0x400890`.
+# .rela.plt gives (GOT slot -> symbol) in stub order; stub i follows from the
+# .plt layout.
+#
+# Needs its own source: the program above calls nothing from a library, so it
+# has no PLT at all.
+# RUN: echo 'int puts(const char *);' > %t/dyn.c
+# RUN: echo 'int main(void) { puts("x"); return 0; }' >> %t/dyn.c
+# RUN: gcc -O0 -no-pie -o %t/dyn %t/dyn.c
+# RUN: %sleigh-poc --file=%t/dyn --specs=%specs --functions | FileCheck --check-prefix=PLT %s
+
+# PLT: puts@plt
+
+
+# --raw declines the container and reads the file flat, which is what you want
+# when the header is lying to you.
+# RUN: %sleigh-poc --file=%t/p --sla=%specs/x86-64.sla --raw --max=1 \
+# RUN:   --passes=print-ssa | FileCheck --check-prefix=RAW %s
+
+# RAW-NOT: ELF 64-bit
+# RAW: === region 0x0-
