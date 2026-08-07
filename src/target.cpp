@@ -12,10 +12,14 @@ namespace ddd {
 namespace {
 
 bool parse_number(const std::string &text, uint64_t &out) {
-  if (text.empty()) return false;
+  if (text.empty())
+    return false;
   try {
     size_t consumed = 0;
-    int base = (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) ? 16 : 10;
+    int base = (text.size() > 2 && text[0] == '0' &&
+                (text[1] == 'x' || text[1] == 'X'))
+                   ? 16
+                   : 10;
     out = std::stoull(text, &consumed, base);
     return consumed == text.size();
   } catch (...) {
@@ -32,7 +36,8 @@ std::vector<std::string> split(const std::string &text, char separator) {
   std::vector<std::string> parts;
   std::istringstream stream(text);
   std::string part;
-  while (std::getline(stream, part, separator)) parts.push_back(part);
+  while (std::getline(stream, part, separator))
+    parts.push_back(part);
   return parts;
 }
 
@@ -50,16 +55,19 @@ TargetSet::TargetSet(const Image &image)
 
 TargetSet::~TargetSet() = default;
 
-TargetSet::Instance *TargetSet::instance_for(const std::string &spec,
-                                             const std::vector<std::string> &context) {
+TargetSet::Instance *
+TargetSet::instance_for(const std::string &spec,
+                        const std::vector<std::string> &context) {
   for (const std::unique_ptr<Instance> &instance : instances_)
-    if (instance->spec == spec && instance->context == context) return instance.get();
+    if (instance->spec == spec && instance->context == context)
+      return instance.get();
 
   auto instance = std::make_unique<Instance>();
   instance->spec = spec;
   instance->context = context;
   instance->ghidra_context = std::make_unique<ghidra::ContextInternal>();
-  instance->sleigh = std::make_unique<ghidra::Sleigh>(loader_.get(), instance->ghidra_context.get());
+  instance->sleigh = std::make_unique<ghidra::Sleigh>(
+      loader_.get(), instance->ghidra_context.get());
 
   std::string absolute = std::filesystem::absolute(spec).string();
   std::istringstream wrapper("<sleigh>" + absolute + "</sleigh>");
@@ -88,7 +96,8 @@ TargetSet::Instance *TargetSet::instance_for(const std::string &spec,
     try {
       instance->ghidra_context->setVariableDefault(parts[0], value);
     } catch (ghidra::LowlevelError &error) {
-      std::cerr << "unknown context variable " << parts[0] << ": " << error.explain << '\n';
+      std::cerr << "unknown context variable " << parts[0] << ": "
+                << error.explain << '\n';
     }
   }
 
@@ -101,22 +110,26 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
                            const std::vector<std::string> &context,
                            const std::string &name) {
   Instance *instance = instance_for(spec, context);
-  if (instance == nullptr) return nullptr;
+  if (instance == nullptr)
+    return nullptr;
 
   Target target;
   target.spec = spec;
   target.context = context;
   target.translator = instance->sleigh.get();
 
-  target.abi = abi.empty() ? guess_convention(*target.translator) : find_convention(abi);
+  target.abi =
+      abi.empty() ? guess_convention(*target.translator) : find_convention(abi);
   if (!abi.empty() && target.abi == nullptr) {
     std::cerr << "unknown abi: " << abi << "\n  known:";
-    for (const CallingConvention &c : conventions()) std::cerr << ' ' << c.name;
+    for (const CallingConvention &c : conventions())
+      std::cerr << ' ' << c.name;
     std::cerr << '\n';
   }
 
   std::string sp = stack_pointer;
-  if (sp.empty() && target.abi != nullptr) sp = target.abi->stack_pointer;
+  if (sp.empty() && target.abi != nullptr)
+    sp = target.abi->stack_pointer;
   if (!sp.empty()) {
     target.stack_pointer = register_storage(*target.translator, sp);
     if (target.stack_pointer.space == nullptr)
@@ -127,7 +140,8 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
     target.name = name;
   } else {
     target.name = std::filesystem::path(spec).stem().string();
-    if (!context.empty()) target.name += ":" + context.front();
+    if (!context.empty())
+      target.name += ":" + context.front();
   }
 
   targets_.push_back(std::move(target));
@@ -138,7 +152,8 @@ bool parse_region(const std::string &text, TargetSet &targets,
                   const std::string &spec_dir, Region &out) {
   std::vector<std::string> parts = split(text, ':');
   if (parts.size() < 3) {
-    std::cerr << "bad region (want BEGIN:END:SPEC[:ABI[:SP[:CTX]]]): " << text << '\n';
+    std::cerr << "bad region (want BEGIN:END:SPEC[:ABI[:SP[:CTX]]]): " << text
+              << '\n';
     return false;
   }
 
@@ -160,10 +175,12 @@ bool parse_region(const std::string &text, TargetSet &targets,
   const std::string sp = parts.size() > 4 ? parts[4] : "";
 
   std::vector<std::string> context;
-  if (parts.size() > 5 && !parts[5].empty()) context = split(parts[5], '+');
+  if (parts.size() > 5 && !parts[5].empty())
+    context = split(parts[5], '+');
 
   out.target = targets.acquire(spec, abi, sp, context);
-  if (out.target == nullptr) return false;
+  if (out.target == nullptr)
+    return false;
 
   out.kind = RegionKind::Code;
   out.name = out.target->name;

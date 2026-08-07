@@ -23,8 +23,8 @@
 
 namespace ddd {
 
-using ghidra::AddrSpace;
 using ghidra::Address;
+using ghidra::AddrSpace;
 using ghidra::OpCode;
 using ghidra::VarnodeData;
 
@@ -61,8 +61,10 @@ struct Storage {
   bool operator<(const Storage &o) const {
     int index = space != nullptr ? space->getIndex() : -1;
     int other = o.space != nullptr ? o.space->getIndex() : -1;
-    if (index != other) return index < other;
-    if (offset != o.offset) return offset < o.offset;
+    if (index != other)
+      return index < other;
+    if (offset != o.offset)
+      return offset < o.offset;
     return size < o.size;
   }
 };
@@ -70,8 +72,10 @@ struct Storage {
 struct StorageHash {
   size_t operator()(const Storage &s) const noexcept {
     size_t h = std::hash<const void *>()(s.space);
-    h ^= std::hash<uint64_t>()(s.offset) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-    h ^= std::hash<uint32_t>()(s.size) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    h ^= std::hash<uint64_t>()(s.offset) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+         (h >> 2);
+    h ^= std::hash<uint32_t>()(s.size) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+         (h >> 2);
     return h;
   }
 };
@@ -109,7 +113,8 @@ public:
 // that printAssembly()/oneInstruction() returns.
 class NullAssembly final : public ghidra::AssemblyEmit {
 public:
-  void dump(const Address &, const std::string &, const std::string &) override {}
+  void dump(const Address &, const std::string &,
+            const std::string &) override {}
 };
 
 } // namespace ddd

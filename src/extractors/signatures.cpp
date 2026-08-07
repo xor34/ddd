@@ -58,15 +58,19 @@ const std::vector<Signature> &signatures() {
 class Signatures final : public Extractor {
 public:
   std::string name() const override { return "signatures"; }
-  std::string description() const override { return "scan for known format magic bytes"; }
+  std::string description() const override {
+    return "scan for known format magic bytes";
+  }
 
   std::vector<Finding> scan(const Image &image, ExtractContext &ctx) override {
     std::vector<Finding> findings;
-    if (image.empty()) return findings;
+    if (image.empty())
+      return findings;
 
     for (uint64_t addr = image.base(); addr < image.limit(); ++addr) {
       for (const Signature &signature : signatures()) {
-        if (!matches(image, addr, signature)) continue;
+        if (!matches(image, addr, signature))
+          continue;
 
         Finding finding;
         finding.offset = addr;
@@ -77,14 +81,18 @@ public:
       }
     }
 
-    if (ctx.verbose) ctx.stream() << "  " << findings.size() << " signature hit(s)\n";
+    if (ctx.verbose)
+      ctx.stream() << "  " << findings.size() << " signature hit(s)\n";
     return findings;
   }
 
 private:
-  static bool matches(const Image &image, uint64_t addr, const Signature &signature) {
-    if (!image.contains(addr, signature.magic.size())) return false;
-    return std::memcmp(image.at(addr), signature.magic.data(), signature.magic.size()) == 0;
+  static bool matches(const Image &image, uint64_t addr,
+                      const Signature &signature) {
+    if (!image.contains(addr, signature.magic.size()))
+      return false;
+    return std::memcmp(image.at(addr), signature.magic.data(),
+                       signature.magic.size()) == 0;
   }
 };
 

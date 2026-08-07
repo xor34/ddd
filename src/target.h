@@ -29,12 +29,12 @@ class ContextInternal;
 namespace ddd {
 
 struct Target {
-  std::string name;                       // display name, e.g. "AARCH64" or "x86:real"
-  std::string spec;                       // path to the .sla
-  std::vector<std::string> context;       // NAME=VALUE, as passed to Sleigh
+  std::string name; // display name, e.g. "AARCH64" or "x86:real"
+  std::string spec; // path to the .sla
+  std::vector<std::string> context; // NAME=VALUE, as passed to Sleigh
   ghidra::Sleigh *translator = nullptr;
   const CallingConvention *abi = nullptr;
-  Storage stack_pointer;                  // zeroed if unknown
+  Storage stack_pointer; // zeroed if unknown
 };
 
 class TargetSet {

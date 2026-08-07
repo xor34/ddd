@@ -28,12 +28,12 @@ struct SsaValue {
   int id = -1;
   Storage storage;
   int version = 0;
-  int block = -1;           // block containing the definition
-  SsaOp *def = nullptr;     // null for a live-in (parameter / uninitialized read)
+  int block = -1;       // block containing the definition
+  SsaOp *def = nullptr; // null for a live-in (parameter / uninitialized read)
   std::vector<SsaOp *> uses;
 
   bool is_live_in() const { return def == nullptr; }
-  bool is_phi() const;      // defined below, once SsaOp is complete
+  bool is_phi() const; // defined below, once SsaOp is complete
   std::string name() const;
 };
 

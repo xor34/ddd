@@ -20,9 +20,9 @@ namespace ddd {
 
 struct CallingConvention {
   std::string name;
-  std::string signature_register;       // used to recognise the architecture
-  std::vector<std::string> arguments;   // integer/pointer args, in order
-  std::string result;                   // where the return value comes back
+  std::string signature_register;     // used to recognise the architecture
+  std::vector<std::string> arguments; // integer/pointer args, in order
+  std::string result;                 // where the return value comes back
   std::string stack_pointer;
 };
 

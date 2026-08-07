@@ -20,11 +20,13 @@ constexpr double kLowEntropy = 1.5;
 
 double entropy_of(const Image &image, uint64_t addr, uint64_t length) {
   unsigned counts[256] = {};
-  for (uint64_t i = 0; i < length; ++i) ++counts[*image.at(addr + i)];
+  for (uint64_t i = 0; i < length; ++i)
+    ++counts[*image.at(addr + i)];
 
   double bits = 0.0;
   for (unsigned count : counts) {
-    if (count == 0) continue;
+    if (count == 0)
+      continue;
     double p = static_cast<double>(count) / static_cast<double>(length);
     bits -= p * std::log2(p);
   }
@@ -32,8 +34,10 @@ double entropy_of(const Image &image, uint64_t addr, uint64_t length) {
 }
 
 const char *classify(double bits) {
-  if (bits >= kHighEntropy) return "high-entropy";
-  if (bits <= kLowEntropy) return "low-entropy";
+  if (bits >= kHighEntropy)
+    return "high-entropy";
+  if (bits <= kLowEntropy)
+    return "low-entropy";
   return nullptr; // ordinary; not worth reporting
 }
 
@@ -46,7 +50,8 @@ public:
 
   std::vector<Finding> scan(const Image &image, ExtractContext &ctx) override {
     std::vector<Finding> findings;
-    if (image.size() < kWindow) return findings;
+    if (image.size() < kWindow)
+      return findings;
 
     const char *run_kind = nullptr;
     uint64_t run_begin = 0;
@@ -54,7 +59,8 @@ public:
     int run_windows = 0;
 
     auto flush = [&](uint64_t end) {
-      if (run_kind == nullptr) return;
+      if (run_kind == nullptr)
+        return;
 
       std::ostringstream detail;
       detail << "mean " << (run_total / run_windows) << " bits/byte";
@@ -72,14 +78,17 @@ public:
       run_kind = nullptr;
     };
 
-    for (uint64_t addr = image.base(); addr + kWindow <= image.limit(); addr += kWindow) {
+    for (uint64_t addr = image.base(); addr + kWindow <= image.limit();
+         addr += kWindow) {
       double bits = entropy_of(image, addr, kWindow);
       const char *kind = classify(bits);
 
-      if (kind == nullptr || (run_kind != nullptr && std::string(kind) != run_kind)) {
+      if (kind == nullptr ||
+          (run_kind != nullptr && std::string(kind) != run_kind)) {
         flush(addr);
       }
-      if (kind == nullptr) continue;
+      if (kind == nullptr)
+        continue;
 
       if (run_kind == nullptr) {
         run_kind = kind;
@@ -92,7 +101,8 @@ public:
     }
     flush(image.limit());
 
-    if (ctx.verbose) ctx.stream() << "  " << findings.size() << " entropy region(s)\n";
+    if (ctx.verbose)
+      ctx.stream() << "  " << findings.size() << " entropy region(s)\n";
     return findings;
   }
 };

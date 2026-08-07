@@ -4,8 +4,9 @@
 // inherit and no CRTP: fill in the fields of BlockAnalysis<Fact> and call
 // solve().
 //
-//   forward:   in[b]  = merge over preds of out[p];  out[b] = transform(b, in[b])
-//   backward:  out[b] = merge over succs of in[s];   in[b]  = transform(b, out[b])
+//   forward:   in[b]  = merge over preds of out[p];  out[b] = transform(b,
+//   in[b]) backward:  out[b] = merge over succs of in[s];   in[b]  =
+//   transform(b, out[b])
 //
 // Use this for the classic whole-block analyses (liveness, available
 // expressions, reaching definitions). For anything that wants one fact per
@@ -25,8 +26,7 @@ namespace ddd {
 
 enum class Direction { Forward, Backward };
 
-template <typename Fact>
-struct BlockAnalysis {
+template <typename Fact> struct BlockAnalysis {
   Direction direction = Direction::Forward;
 
   // The "nothing known yet" fact, and the identity for merge.
@@ -41,14 +41,14 @@ struct BlockAnalysis {
       [](const Fact &a, const Fact &b) { return a == b; };
 };
 
-template <typename Fact>
-struct BlockResult {
+template <typename Fact> struct BlockResult {
   std::vector<Fact> in;
   std::vector<Fact> out;
 };
 
 template <typename Fact>
-BlockResult<Fact> solve(const SsaFunction &fn, const BlockAnalysis<Fact> &analysis) {
+BlockResult<Fact> solve(const SsaFunction &fn,
+                        const BlockAnalysis<Fact> &analysis) {
   const Cfg &cfg = fn.cfg();
   const Dominance &dom = fn.dominance();
   const bool forward = analysis.direction == Direction::Forward;
@@ -57,14 +57,17 @@ BlockResult<Fact> solve(const SsaFunction &fn, const BlockAnalysis<Fact> &analys
   BlockResult<Fact> result;
   result.in.assign(n, analysis.init());
   result.out.assign(n, analysis.init());
-  if (n == 0) return result;
+  if (n == 0)
+    return result;
 
   // Reverse postorder converges fastest forwards, its reverse backwards.
   // Unreachable blocks are not in the rpo, so append them.
   std::vector<int> order = dom.rpo;
   for (int b = 0; b < n; ++b)
-    if (!dom.reachable(b)) order.push_back(b);
-  if (!forward) std::reverse(order.begin(), order.end());
+    if (!dom.reachable(b))
+      order.push_back(b);
+  if (!forward)
+    std::reverse(order.begin(), order.end());
 
   std::deque<int> worklist(order.begin(), order.end());
   std::vector<bool> queued(n, true);
@@ -78,12 +81,14 @@ BlockResult<Fact> solve(const SsaFunction &fn, const BlockAnalysis<Fact> &analys
     bool first = true;
     if (forward) {
       for (int p : cfg[b].preds) {
-        incoming = first ? result.out[p] : analysis.merge(incoming, result.out[p]);
+        incoming =
+            first ? result.out[p] : analysis.merge(incoming, result.out[p]);
         first = false;
       }
     } else {
       for (const Edge &e : cfg[b].succs) {
-        incoming = first ? result.in[e.target] : analysis.merge(incoming, result.in[e.target]);
+        incoming = first ? result.in[e.target]
+                         : analysis.merge(incoming, result.in[e.target]);
         first = false;
       }
     }
@@ -92,18 +97,22 @@ BlockResult<Fact> solve(const SsaFunction &fn, const BlockAnalysis<Fact> &analys
 
     Fact outgoing = analysis.transform(fn[b], incoming);
     Fact &slot = forward ? result.out[b] : result.in[b];
-    if (analysis.equal(slot, outgoing)) continue;
+    if (analysis.equal(slot, outgoing))
+      continue;
     slot = std::move(outgoing);
 
     auto enqueue = [&](int next) {
-      if (queued[next]) return;
+      if (queued[next])
+        return;
       queued[next] = true;
       worklist.push_back(next);
     };
     if (forward) {
-      for (const Edge &e : cfg[b].succs) enqueue(e.target);
+      for (const Edge &e : cfg[b].succs)
+        enqueue(e.target);
     } else {
-      for (int p : cfg[b].preds) enqueue(p);
+      for (int p : cfg[b].preds)
+        enqueue(p);
     }
   }
 

@@ -26,9 +26,9 @@
 namespace ddd {
 
 struct Finding {
-  uint64_t offset = 0;   // absolute address in the image
-  uint64_t length = 0;   // 0 when the extent is unknown
-  std::string kind;      // "gzip", "code", "high-entropy", "strings"
+  uint64_t offset = 0; // absolute address in the image
+  uint64_t length = 0; // 0 when the extent is unknown
+  std::string kind;    // "gzip", "code", "high-entropy", "strings"
   std::string detail;
   double confidence = 1.0;
 
@@ -54,7 +54,8 @@ public:
 
   virtual std::string name() const = 0;
   virtual std::string description() const = 0;
-  virtual std::vector<Finding> scan(const Image &image, ExtractContext &ctx) = 0;
+  virtual std::vector<Finding> scan(const Image &image,
+                                    ExtractContext &ctx) = 0;
 };
 
 class ExtractorRegistry {
@@ -77,13 +78,13 @@ private:
   std::vector<Entry> entries_;
 };
 
-template <typename T>
-struct ExtractorRegistrar {
+template <typename T> struct ExtractorRegistrar {
   ExtractorRegistrar() {
     T probe;
-    ExtractorRegistry::instance().add(ExtractorRegistry::Entry{
-        probe.name(), probe.description(),
-        [] { return std::unique_ptr<Extractor>(new T()); }});
+    ExtractorRegistry::instance().add(
+        ExtractorRegistry::Entry{probe.name(), probe.description(), [] {
+                                   return std::unique_ptr<Extractor>(new T());
+                                 }});
   }
 };
 

@@ -36,8 +36,8 @@ struct Edge {
 
 struct BasicBlock {
   int id = -1;
-  Address start;        // address of the first instruction in the block
-  Address end;          // one past the last instruction
+  Address start; // address of the first instruction in the block
+  Address end;   // one past the last instruction
   std::vector<PcodeOp> ops;
   std::vector<Edge> succs;
   std::vector<int> preds;

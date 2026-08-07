@@ -30,10 +30,10 @@ namespace ddd {
 // hold more than one instruction set, and one instruction set can be used
 // under more than one convention.
 struct PassContext {
-  const Target *target = nullptr;      // ISA + ABI in force here; may be null
-  const Image *image = nullptr;        // the bytes, code and data; may be null
-  Annotations *annotations = nullptr;  // where passes record what they found
-  std::ostream *out = nullptr;         // where passes report; defaults to stdout
+  const Target *target = nullptr;     // ISA + ABI in force here; may be null
+  const Image *image = nullptr;       // the bytes, code and data; may be null
+  Annotations *annotations = nullptr; // where passes record what they found
+  std::ostream *out = nullptr;        // where passes report; defaults to stdout
   bool verbose = false;
 
   ghidra::Sleigh *translator() const;
@@ -81,8 +81,7 @@ private:
   std::vector<Entry> entries_;
 };
 
-template <typename T>
-struct PassRegistrar {
+template <typename T> struct PassRegistrar {
   PassRegistrar() {
     T probe;
     PassRegistry::instance().add(

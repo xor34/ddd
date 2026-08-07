@@ -69,13 +69,15 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
   Address addr = start;
 
   for (int count = 0; count < limits.max_instructions; ++count) {
-    if (!limits.end.isInvalid() && !(addr < limits.end)) break;
+    if (!limits.end.isInvalid() && !(addr < limits.end))
+      break;
 
     PcodeCapture capture;
     TextAssembly text;
     ghidra::int4 length = 1;
     try {
-      if (limits.disassemble) translator.printAssembly(text, addr);
+      if (limits.disassemble)
+        translator.printAssembly(text, addr);
       length = translator.oneInstruction(capture, addr);
     } catch (ghidra::LowlevelError &) {
       // Undecodable byte: skip it, contribute no p-code.
@@ -83,7 +85,8 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
       capture.ops.clear();
       text.text = "(bad)";
     }
-    if (length <= 0) length = 1;
+    if (length <= 0)
+      length = 1;
 
     SweptInstruction instr;
     instr.addr = addr;
@@ -92,10 +95,12 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
     instr.op_count = capture.ops.size();
 
     sweep.offset_to_op[addr.getOffset()] = instr.first_op;
-    sweep.decoded[addr.getOffset()] = Instruction{addr, length, std::move(text.text)};
+    sweep.decoded[addr.getOffset()] =
+        Instruction{addr, length, std::move(text.text)};
     sweep.instructions.push_back(instr);
 
-    for (PcodeOp &op : capture.ops) sweep.ops.push_back(std::move(op));
+    for (PcodeOp &op : capture.ops)
+      sweep.ops.push_back(std::move(op));
 
     addr = addr + length;
   }
@@ -115,16 +120,21 @@ long long resolve_target(const Sweep &sweep, size_t op_index,
   if (is_constant(dest)) {
     // p-code-relative: signed offset from this op's index within its own
     // instruction's op list.
-    const SweptInstruction &instr = sweep.instructions[sweep.op_to_instruction[op_index]];
+    const SweptInstruction &instr =
+        sweep.instructions[sweep.op_to_instruction[op_index]];
     long long local = static_cast<long long>(op_index - instr.first_op);
-    long long target = local + static_cast<long long>(static_cast<int64_t>(dest.offset));
-    if (target < 0 || static_cast<size_t>(target) >= instr.op_count) return -1;
+    long long target =
+        local + static_cast<long long>(static_cast<int64_t>(dest.offset));
+    if (target < 0 || static_cast<size_t>(target) >= instr.op_count)
+      return -1;
     return static_cast<long long>(instr.first_op + static_cast<size_t>(target));
   }
 
   auto it = sweep.offset_to_op.find(static_cast<uint64_t>(dest.offset));
-  if (it == sweep.offset_to_op.end()) return -1;
-  if (it->second >= sweep.ops.size()) return -1; // fell off the end of the sweep
+  if (it == sweep.offset_to_op.end())
+    return -1;
+  if (it->second >= sweep.ops.size())
+    return -1; // fell off the end of the sweep
   return static_cast<long long>(it->second);
 }
 
@@ -133,14 +143,17 @@ std::vector<size_t> find_leaders(const Sweep &sweep) {
 
   for (size_t i = 0; i < sweep.ops.size(); ++i) {
     const PcodeOp &op = sweep.ops[i];
-    if (!is_terminator(op.opc)) continue;
+    if (!is_terminator(op.opc))
+      continue;
 
-    if (i + 1 < sweep.ops.size()) leaders.insert(i + 1);
+    if (i + 1 < sweep.ops.size())
+      leaders.insert(i + 1);
 
     if ((op.opc == ghidra::CPUI_BRANCH || op.opc == ghidra::CPUI_CBRANCH) &&
         !op.inputs.empty()) {
       long long target = resolve_target(sweep, i, op.inputs[0]);
-      if (target >= 0) leaders.insert(static_cast<size_t>(target));
+      if (target >= 0)
+        leaders.insert(static_cast<size_t>(target));
     }
   }
 
@@ -155,7 +168,8 @@ const Instruction *Cfg::instruction_at(const Address &addr) const {
 }
 
 void Cfg::refresh_preds() {
-  for (BasicBlock &b : blocks) b.preds.clear();
+  for (BasicBlock &b : blocks)
+    b.preds.clear();
   for (const BasicBlock &b : blocks)
     for (const Edge &e : b.succs)
       blocks[e.target].preds.push_back(b.id);
@@ -166,7 +180,8 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
   Cfg cfg;
 
   Sweep sweep = sweep_instructions(translator, start, limits);
-  if (sweep.ops.empty()) return cfg;
+  if (sweep.ops.empty())
+    return cfg;
 
   std::vector<size_t> leaders = find_leaders(sweep);
 
@@ -176,25 +191,30 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
     return static_cast<int>(std::distance(leaders.begin(), it)) - 1;
   };
 
-  struct Range { size_t begin, end; };
+  struct Range {
+    size_t begin, end;
+  };
   std::vector<Range> ranges;
 
   for (size_t i = 0; i < leaders.size(); ++i) {
     size_t begin = leaders[i];
     size_t end = (i + 1 < leaders.size()) ? leaders[i + 1] : sweep.ops.size();
-    if (begin >= end) continue;
+    if (begin >= end)
+      continue;
 
     BasicBlock block;
     block.id = cfg.size();
     block.start = sweep.ops[begin].addr;
-    const SweptInstruction &last = sweep.instructions[sweep.op_to_instruction[end - 1]];
+    const SweptInstruction &last =
+        sweep.instructions[sweep.op_to_instruction[end - 1]];
     block.end = last.addr + last.length;
     block.ops.assign(sweep.ops.begin() + begin, sweep.ops.begin() + end);
 
     ranges.push_back({begin, end});
     cfg.blocks.push_back(std::move(block));
   }
-  if (cfg.empty()) return cfg;
+  if (cfg.empty())
+    return cfg;
   cfg.entry = 0;
   cfg.instructions = std::move(sweep.decoded);
   cfg.code_begin = static_cast<uint64_t>(start.getOffset());
@@ -209,11 +229,13 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
     const PcodeOp &last = sweep.ops[range.end - 1];
 
     auto fallthrough = [&]() -> int {
-      if (range.end >= sweep.ops.size()) return -1;
+      if (range.end >= sweep.ops.size())
+        return -1;
       return block_of_op(range.end);
     };
     auto branch_target = [&]() -> int {
-      if (last.inputs.empty()) return -1;
+      if (last.inputs.empty())
+        return -1;
       long long target = resolve_target(sweep, range.end - 1, last.inputs[0]);
       return target < 0 ? -1 : block_of_op(static_cast<size_t>(target));
     };
@@ -225,13 +247,16 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
 
     case ghidra::CPUI_BRANCH:
       block.ends_in_branch = true;
-      if (int t = branch_target(); t >= 0) block.succs.push_back({t, false});
+      if (int t = branch_target(); t >= 0)
+        block.succs.push_back({t, false});
       break;
 
     case ghidra::CPUI_CBRANCH:
       block.ends_in_branch = true;
-      if (int t = branch_target(); t >= 0) block.succs.push_back({t, true});
-      if (int f = fallthrough(); f >= 0) block.succs.push_back({f, false});
+      if (int t = branch_target(); t >= 0)
+        block.succs.push_back({t, true});
+      if (int f = fallthrough(); f >= 0)
+        block.succs.push_back({f, false});
       break;
 
     case ghidra::CPUI_BRANCHIND:
@@ -244,13 +269,15 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
       block.ends_in_call = true;
       // Assume the callee returns; there is no interprocedural noreturn
       // analysis here.
-      if (int f = fallthrough(); f >= 0) block.succs.push_back({f, false});
+      if (int f = fallthrough(); f >= 0)
+        block.succs.push_back({f, false});
       break;
 
     default:
       // The block ended here because something else branches to the next op,
       // not because `last` is a control-flow op: plain fall-through.
-      if (int f = fallthrough(); f >= 0) block.succs.push_back({f, false});
+      if (int f = fallthrough(); f >= 0)
+        block.succs.push_back({f, false});
       break;
     }
   }
@@ -265,10 +292,14 @@ std::string to_string(const Cfg &cfg) {
   for (const BasicBlock &block : cfg.blocks) {
     os << "block " << block.id << "  [0x" << std::hex << block.start.getOffset()
        << ", 0x" << block.end.getOffset() << ")" << std::dec;
-    if (block.id == cfg.entry) os << " entry";
-    if (block.ends_in_call) os << " call";
-    if (block.ends_in_return) os << " return";
-    if (block.ends_in_branch) os << " branch";
+    if (block.id == cfg.entry)
+      os << " entry";
+    if (block.ends_in_call)
+      os << " call";
+    if (block.ends_in_return)
+      os << " return";
+    if (block.ends_in_branch)
+      os << " branch";
     os << "\n";
 
     uint64_t shown = ~uint64_t(0);
@@ -282,9 +313,11 @@ std::string to_string(const Cfg &cfg) {
       }
 
       os << "      ";
-      if (op.has_output) os << to_string(op.output) << " = ";
+      if (op.has_output)
+        os << to_string(op.output) << " = ";
       os << ghidra::get_opname(op.opc);
-      for (const VarnodeData &in : op.inputs) os << ' ' << to_string(in);
+      for (const VarnodeData &in : op.inputs)
+        os << ' ' << to_string(in);
       os << "\n";
     }
 
@@ -293,9 +326,11 @@ std::string to_string(const Cfg &cfg) {
       os << "(none)";
     } else {
       for (size_t i = 0; i < block.succs.size(); ++i) {
-        if (i) os << ", ";
+        if (i)
+          os << ", ";
         os << block.succs[i].target;
-        if (block.succs[i].conditional) os << " (taken)";
+        if (block.succs[i].conditional)
+          os << " (taken)";
       }
     }
     os << "\n";

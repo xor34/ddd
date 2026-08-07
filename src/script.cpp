@@ -17,7 +17,8 @@ constexpr size_t kChunk = 65536;
 } // namespace
 
 std::vector<std::string> interpreter_for(const std::string &path) {
-  if (std::filesystem::path(path).extension() == ".py") return {"python3", path};
+  if (std::filesystem::path(path).extension() == ".py")
+    return {"python3", path};
   return {path};
 }
 
@@ -58,7 +59,8 @@ ScriptResult run_script(const std::vector<std::string> &command,
 
     std::vector<char *> argv;
     argv.reserve(command.size() + 1);
-    for (const std::string &arg : command) argv.push_back(const_cast<char *>(arg.c_str()));
+    for (const std::string &arg : command)
+      argv.push_back(const_cast<char *>(arg.c_str()));
     argv.push_back(nullptr);
 
     execvp(argv[0], argv.data());
@@ -70,15 +72,17 @@ ScriptResult run_script(const std::vector<std::string> &command,
 
   // The child can block writing before we finish writing to it, so ignore
   // SIGPIPE and read whatever arrives after a short write rather than dying.
-  struct sigaction ignore {};
-  struct sigaction previous {};
+  struct sigaction ignore{};
+  struct sigaction previous{};
   ignore.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &ignore, &previous);
 
   size_t written = 0;
   while (written < input.size()) {
-    ssize_t n = write(to_child[1], input.data() + written, input.size() - written);
-    if (n <= 0) break;
+    ssize_t n =
+        write(to_child[1], input.data() + written, input.size() - written);
+    if (n <= 0)
+      break;
     written += static_cast<size_t>(n);
   }
   close(to_child[1]);
@@ -86,8 +90,10 @@ ScriptResult run_script(const std::vector<std::string> &command,
   std::vector<uint8_t> buffer(kChunk);
   while (true) {
     ssize_t n = read(from_child[0], buffer.data(), buffer.size());
-    if (n <= 0) break;
-    result.output.insert(result.output.end(), buffer.begin(), buffer.begin() + n);
+    if (n <= 0)
+      break;
+    result.output.insert(result.output.end(), buffer.begin(),
+                         buffer.begin() + n);
   }
   close(from_child[0]);
 
@@ -100,7 +106,8 @@ ScriptResult run_script(const std::vector<std::string> &command,
     return result;
   }
   if (WEXITSTATUS(status) != 0) {
-    result.error = "script exited with status " + std::to_string(WEXITSTATUS(status));
+    result.error =
+        "script exited with status " + std::to_string(WEXITSTATUS(status));
     return result;
   }
 

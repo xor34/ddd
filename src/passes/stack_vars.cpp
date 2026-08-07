@@ -31,14 +31,18 @@ struct StackValue {
   static StackValue bottom() { return {Bottom, 0}; }
 
   bool operator==(const StackValue &o) const {
-    return state == o.state && (state == Top || state == Bottom || value == o.value);
+    return state == o.state &&
+           (state == Top || state == Bottom || value == o.value);
   }
 };
 
 StackValue meet(const StackValue &a, const StackValue &b) {
-  if (a.state == StackValue::Top) return b;
-  if (b.state == StackValue::Top) return a;
-  if (a.state != b.state || a.value != b.value) return StackValue::bottom();
+  if (a.state == StackValue::Top)
+    return b;
+  if (b.state == StackValue::Top)
+    return a;
+  if (a.state != b.state || a.value != b.value)
+    return StackValue::bottom();
   return a;
 }
 
@@ -55,14 +59,19 @@ StackValue evaluate(const SsaOp &op, const StackValue &a, const StackValue &b) {
     return a;
 
   case ghidra::CPUI_INT_ADD:
-    if (a_frame && b_num) return StackValue::frame(a.value + b.value);
-    if (a_num && b_frame) return StackValue::frame(a.value + b.value);
-    if (a_num && b_num) return StackValue::number(a.value + b.value);
+    if (a_frame && b_num)
+      return StackValue::frame(a.value + b.value);
+    if (a_num && b_frame)
+      return StackValue::frame(a.value + b.value);
+    if (a_num && b_num)
+      return StackValue::number(a.value + b.value);
     return StackValue::bottom();
 
   case ghidra::CPUI_INT_SUB:
-    if (a_frame && b_num) return StackValue::frame(a.value - b.value);
-    if (a_num && b_num) return StackValue::number(a.value - b.value);
+    if (a_frame && b_num)
+      return StackValue::frame(a.value - b.value);
+    if (a_num && b_num)
+      return StackValue::number(a.value - b.value);
     return StackValue::bottom();
 
   default:
@@ -76,7 +85,8 @@ SparseAnalysis<StackValue> build_analysis(const Storage &stack_pointer) {
   analysis.init = [] { return StackValue{}; };
 
   analysis.raw = [](const VarnodeData &vn) {
-    if (!is_constant(vn)) return StackValue::bottom();
+    if (!is_constant(vn))
+      return StackValue::bottom();
     // Stack offsets arrive as unsigned constants that are really negative in
     // the pointer's width, so sign-extend before doing arithmetic with them.
     int64_t value = static_cast<int64_t>(vn.offset);
@@ -92,7 +102,8 @@ SparseAnalysis<StackValue> build_analysis(const Storage &stack_pointer) {
   // The stack pointer on entry is the origin of the frame; every other
   // pre-existing value is unknown.
   analysis.live_in = [stack_pointer](const SsaValue &value) {
-    return value.storage == stack_pointer ? StackValue::frame(0) : StackValue::bottom();
+    return value.storage == stack_pointer ? StackValue::frame(0)
+                                          : StackValue::bottom();
   };
 
   analysis.merge = meet;
@@ -100,7 +111,8 @@ SparseAnalysis<StackValue> build_analysis(const Storage &stack_pointer) {
   analysis.transform = [](const SsaOp &op, const ValueMap<StackValue> &values) {
     StackValue a = op.ins.size() > 0 ? values(op.ins[0]) : StackValue::bottom();
     StackValue b = op.ins.size() > 1 ? values(op.ins[1]) : StackValue::bottom();
-    if (a.state == StackValue::Top || (op.ins.size() > 1 && b.state == StackValue::Top))
+    if (a.state == StackValue::Top ||
+        (op.ins.size() > 1 && b.state == StackValue::Top))
       return StackValue{};
     return evaluate(op, a, b);
   };
@@ -119,7 +131,8 @@ std::string slot_name(int64_t offset) {
 }
 
 std::string frame_expression(int64_t offset) {
-  if (offset == 0) return "sp";
+  if (offset == 0)
+    return "sp";
 
   std::ostringstream os;
   os << "sp" << (offset < 0 ? "-" : "+") << "0x" << std::hex
@@ -136,11 +149,13 @@ public:
 
   void run(SsaFunction &fn, PassContext &ctx) override {
     if (ctx.stack_pointer().space == nullptr) {
-      if (ctx.verbose) ctx.stream() << "  no stack pointer known, skipping\n";
+      if (ctx.verbose)
+        ctx.stream() << "  no stack pointer known, skipping\n";
       return;
     }
 
-    SparseResult<StackValue> result = solve(fn, build_analysis(ctx.stack_pointer()));
+    SparseResult<StackValue> result =
+        solve(fn, build_analysis(ctx.stack_pointer()));
 
     // offset -> widest access seen there
     std::map<int64_t, unsigned> slots;
@@ -153,10 +168,12 @@ public:
         label_frame_pointer(ctx, op, result);
         return;
       }
-      if (op.ins.size() < 2 || !op.ins[1].is_tracked()) return;
+      if (op.ins.size() < 2 || !op.ins[1].is_tracked())
+        return;
 
       const StackValue &address = result[*op.ins[1].value];
-      if (address.state != StackValue::Frame) return;
+      if (address.state != StackValue::Frame)
+        return;
 
       unsigned width = load ? (op.out != nullptr ? op.out->storage.size : 0)
                             : (op.ins.size() > 2 ? op.ins[2].raw.size : 0);
@@ -166,7 +183,7 @@ public:
       const std::string name = slot_name(address.value);
       ctx.annotations->set_label(*op.ins[1].value, "&" + name);
       ctx.annotations->comment(op, (load ? "load " : "store ") + name + " [" +
-                          frame_expression(address.value) + "]");
+                                       frame_expression(address.value) + "]");
     });
 
     report(fn, ctx, slots);
@@ -177,17 +194,20 @@ private:
   // naming -- that is what a frame pointer looks like.
   static void label_frame_pointer(PassContext &ctx, SsaOp &op,
                                   const SparseResult<StackValue> &result) {
-    if (op.out == nullptr || ctx.annotations->has_label(*op.out)) return;
+    if (op.out == nullptr || ctx.annotations->has_label(*op.out))
+      return;
 
     const StackValue &value = result[*op.out];
-    if (value.state != StackValue::Frame) return;
+    if (value.state != StackValue::Frame)
+      return;
     ctx.annotations->set_label(*op.out, frame_expression(value.value));
   }
 
   static void report(const SsaFunction &fn, PassContext &ctx,
                      const std::map<int64_t, unsigned> &slots) {
     if (slots.empty()) {
-      if (ctx.verbose) ctx.stream() << "  no stack slots found\n";
+      if (ctx.verbose)
+        ctx.stream() << "  no stack slots found\n";
       return;
     }
 

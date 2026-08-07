@@ -27,9 +27,12 @@ struct Const {
 };
 
 Const meet(const Const &a, const Const &b) {
-  if (a.state == Const::Top) return b;
-  if (b.state == Const::Top) return a;
-  if (a.state == Const::Bottom || b.state == Const::Bottom) return Const::bottom();
+  if (a.state == Const::Top)
+    return b;
+  if (b.state == Const::Top)
+    return a;
+  if (a.state == Const::Bottom || b.state == Const::Bottom)
+    return Const::bottom();
   return a.value == b.value ? a : Const::bottom();
 }
 
@@ -38,7 +41,8 @@ uint64_t mask_for(uint32_t size) {
 }
 
 uint64_t sign_extend(uint64_t value, uint32_t from_size) {
-  if (from_size == 0 || from_size >= 8) return value;
+  if (from_size == 0 || from_size >= 8)
+    return value;
   uint64_t sign_bit = uint64_t(1) << (from_size * 8 - 1);
   uint64_t m = mask_for(from_size);
   value &= m;
@@ -47,10 +51,13 @@ uint64_t sign_extend(uint64_t value, uint32_t from_size) {
 
 // Byte width of an input, whether it was renamed or left raw.
 uint32_t operand_size(const SsaOp &op, size_t i) {
-  if (i >= op.ins.size()) return 8;
+  if (i >= op.ins.size())
+    return 8;
   const SsaOperand &operand = op.ins[i];
-  if (operand.value != nullptr) return operand.value->storage.size;
-  return operand.raw.space != nullptr ? static_cast<uint32_t>(operand.raw.size) : 8;
+  if (operand.value != nullptr)
+    return operand.value->storage.size;
+  return operand.raw.space != nullptr ? static_cast<uint32_t>(operand.raw.size)
+                                      : 8;
 }
 
 // Returns Bottom for anything not modelled -- the conservative direction.
@@ -60,12 +67,14 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
   auto truncated = [&](uint64_t v) { return Const::known(v & out_mask); };
 
   auto unary = [&](uint64_t &a) {
-    if (in.size() < 1) return false;
+    if (in.size() < 1)
+      return false;
     a = in[0].value;
     return true;
   };
   auto binary = [&](uint64_t &a, uint64_t &b) {
-    if (in.size() < 2) return false;
+    if (in.size() < 2)
+      return false;
     a = in[0].value;
     b = in[1].value;
     return true;
@@ -94,21 +103,28 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
     return unary(a) ? truncated(~a + 1) : Const::bottom();
 
   case ghidra::CPUI_INT_LEFT:
-    if (!binary(a, b)) return Const::bottom();
+    if (!binary(a, b))
+      return Const::bottom();
     return b >= 64 ? truncated(0) : truncated(a << b);
   case ghidra::CPUI_INT_RIGHT:
-    if (!binary(a, b)) return Const::bottom();
-    return b >= 64 ? truncated(0) : truncated((a & mask_for(operand_size(op, 0))) >> b);
+    if (!binary(a, b))
+      return Const::bottom();
+    return b >= 64 ? truncated(0)
+                   : truncated((a & mask_for(operand_size(op, 0))) >> b);
   case ghidra::CPUI_INT_SRIGHT:
-    if (!binary(a, b)) return Const::bottom();
-    if (b >= 64) b = 63;
+    if (!binary(a, b))
+      return Const::bottom();
+    if (b >= 64)
+      b = 63;
     return truncated(static_cast<uint64_t>(
         static_cast<int64_t>(sign_extend(a, operand_size(op, 0))) >> b));
 
   case ghidra::CPUI_INT_ZEXT:
-    return unary(a) ? truncated(a & mask_for(operand_size(op, 0))) : Const::bottom();
+    return unary(a) ? truncated(a & mask_for(operand_size(op, 0)))
+                    : Const::bottom();
   case ghidra::CPUI_INT_SEXT:
-    return unary(a) ? truncated(sign_extend(a, operand_size(op, 0))) : Const::bottom();
+    return unary(a) ? truncated(sign_extend(a, operand_size(op, 0)))
+                    : Const::bottom();
 
   case ghidra::CPUI_INT_EQUAL:
     return binary(a, b) ? Const::known(a == b ? 1 : 0) : Const::bottom();
@@ -119,11 +135,13 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
   case ghidra::CPUI_INT_LESSEQUAL:
     return binary(a, b) ? Const::known(a <= b ? 1 : 0) : Const::bottom();
   case ghidra::CPUI_INT_SLESS:
-    if (!binary(a, b)) return Const::bottom();
-    return Const::known(static_cast<int64_t>(sign_extend(a, operand_size(op, 0))) <
-                                static_cast<int64_t>(sign_extend(b, operand_size(op, 1)))
-                            ? 1
-                            : 0);
+    if (!binary(a, b))
+      return Const::bottom();
+    return Const::known(
+        static_cast<int64_t>(sign_extend(a, operand_size(op, 0))) <
+                static_cast<int64_t>(sign_extend(b, operand_size(op, 1)))
+            ? 1
+            : 0);
 
   case ghidra::CPUI_BOOL_NEGATE:
     return unary(a) ? Const::known(a ? 0 : 1) : Const::bottom();
@@ -135,7 +153,8 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
     return binary(a, b) ? Const::known((!!a != !!b) ? 1 : 0) : Const::bottom();
 
   case ghidra::CPUI_SUBPIECE:
-    if (!binary(a, b)) return Const::bottom();
+    if (!binary(a, b))
+      return Const::bottom();
     return truncated(b >= 8 ? 0 : (a >> (b * 8)));
 
   default:
@@ -163,14 +182,17 @@ SparseAnalysis<Const> build_analysis() {
   analysis.transform = [](const SsaOp &op, const ValueMap<Const> &values) {
     std::vector<Const> in;
     in.reserve(op.ins.size());
-    for (const SsaOperand &operand : op.ins) in.push_back(values(operand));
+    for (const SsaOperand &operand : op.ins)
+      in.push_back(values(operand));
 
     // Stay optimistic while any operand is still Top, give up as soon as one
     // is known not to be constant.
     for (const Const &c : in)
-      if (c.state == Const::Top) return Const{};
+      if (c.state == Const::Top)
+        return Const{};
     for (const Const &c : in)
-      if (c.state == Const::Bottom) return Const::bottom();
+      if (c.state == Const::Bottom)
+        return Const::bottom();
 
     return evaluate(op, in);
   };
@@ -193,16 +215,19 @@ public:
     int constants = 0;
 
     fn.for_each_op([&](const SsaOp &op) {
-      if (op.out == nullptr) return;
+      if (op.out == nullptr)
+        return;
       const Const &value = result[*op.out];
-      if (value.state != Const::Known) return;
+      if (value.state != Const::Known)
+        return;
 
       ++constants;
       os << "    " << ctx.name_of(*op.out) << " = 0x" << std::hex << value.value
          << std::dec << "  (block " << op.block << ")\n";
     });
 
-    os << "  " << constants << " constant value(s) of " << fn.value_count() << "\n";
+    os << "  " << constants << " constant value(s) of " << fn.value_count()
+       << "\n";
   }
 };
 

@@ -20,7 +20,8 @@ namespace {
 
 using namespace ddd::pat;
 
-using Describe = std::function<std::string(const SsaOp &, const Match &, const PassContext &)>;
+using Describe = std::function<std::string(const SsaOp &, const Match &,
+                                           const PassContext &)>;
 
 struct Rule {
   std::string name;
@@ -29,7 +30,9 @@ struct Rule {
 };
 
 Describe says(std::string text) {
-  return [text](const SsaOp &, const Match &, const PassContext &) { return text; };
+  return [text](const SsaOp &, const Match &, const PassContext &) {
+    return text;
+  };
 }
 
 const std::vector<Rule> &rules() {
@@ -45,16 +48,18 @@ const std::vector<Rule> &rules() {
 
       {"zero-and", comm(CPUI_INT_AND, val(0), imm(0)), says("always 0")},
 
-      {"identity-and", op(CPUI_INT_AND, {val(0), val(0)}), says("no-op (x & x)")},
+      {"identity-and", op(CPUI_INT_AND, {val(0), val(0)}),
+       says("no-op (x & x)")},
 
       {"identity-or", op(CPUI_INT_OR, {val(0), val(0)}), says("no-op (x | x)")},
 
-      {"identity-add", comm(CPUI_INT_ADD, val(0), imm(0)), says("no-op (x + 0)")},
+      {"identity-add", comm(CPUI_INT_ADD, val(0), imm(0)),
+       says("no-op (x + 0)")},
 
-      {"always-equal", op(CPUI_INT_EQUAL, {val(0), val(0)}), says("always true")},
+      {"always-equal", op(CPUI_INT_EQUAL, {val(0), val(0)}),
+       says("always true")},
 
-      {"truncate-32",
-       comm(CPUI_INT_AND, val(0), imm(0xffffffffULL)),
+      {"truncate-32", comm(CPUI_INT_AND, val(0), imm(0xffffffffULL)),
        says("truncate to 32 bits")},
 
       // The flag dance behind a signed compare: NG != OV, where NG is the sign
@@ -65,7 +70,8 @@ const std::vector<Rule> &rules() {
                               op(CPUI_INT_SBORROW, {val(1), val(2)})}),
        says("signed <  (NG != OV)")},
 
-      {"nonzero-test", op(CPUI_BOOL_NEGATE, {op(CPUI_INT_EQUAL, {val(0), imm(0)})}),
+      {"nonzero-test",
+       op(CPUI_BOOL_NEGATE, {op(CPUI_INT_EQUAL, {val(0), imm(0)})}),
        says("x != 0")},
 
       // A shift by a constant is a multiply or divide by a power of two; worth
@@ -101,7 +107,8 @@ public:
     fn.for_each_op([&](SsaOp &op) {
       for (const Rule &rule : rules()) {
         Match m;
-        if (!rule.pattern.match(op, m)) continue;
+        if (!rule.pattern.match(op, m))
+          continue;
 
         ctx.annotations->comment(op, rule.describe(op, m, ctx));
         ++matched;
@@ -109,7 +116,8 @@ public:
       }
     });
 
-    if (ctx.verbose) ctx.stream() << "  " << matched << " idiom(s) recognised\n";
+    if (ctx.verbose)
+      ctx.stream() << "  " << matched << " idiom(s) recognised\n";
   }
 };
 

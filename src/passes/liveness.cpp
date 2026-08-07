@@ -37,27 +37,33 @@ BlockAnalysis<LiveSet> build_analysis(const SsaFunction &fn) {
     // Values this block hands to its successors' phis are live on the way out.
     for (const Edge &edge : cfg[block.id].succs) {
       const SsaBlock &succ = fn[edge.target];
-      if (succ.phis.empty()) continue;
+      if (succ.phis.empty())
+        continue;
 
       const std::vector<int> &preds = cfg[edge.target].preds;
       for (size_t i = 0; i < preds.size(); ++i) {
-        if (preds[i] != block.id) continue;
+        if (preds[i] != block.id)
+          continue;
         for (const SsaOp *phi : succ.phis)
-          if (phi->ins[i].value != nullptr) live.insert(phi->ins[i].value->id);
+          if (phi->ins[i].value != nullptr)
+            live.insert(phi->ins[i].value->id);
       }
     }
 
     for (auto it = block.ops.rbegin(); it != block.ops.rend(); ++it) {
       const SsaOp &op = **it;
-      if (op.out != nullptr) live.erase(op.out->id);
+      if (op.out != nullptr)
+        live.erase(op.out->id);
       for (const SsaOperand &in : op.ins)
-        if (in.value != nullptr) live.insert(in.value->id);
+        if (in.value != nullptr)
+          live.insert(in.value->id);
     }
 
     // A phi defines at the top of the block; its operands were already
     // accounted for in the predecessors above.
     for (const SsaOp *phi : block.phis)
-      if (phi->out != nullptr) live.erase(phi->out->id);
+      if (phi->out != nullptr)
+        live.erase(phi->out->id);
 
     return live;
   };
@@ -73,7 +79,8 @@ std::vector<int> ordered(const SsaFunction &fn, const LiveSet &live) {
   std::sort(ids.begin(), ids.end(), [&fn](int a, int b) {
     const SsaValue &left = fn.value(a);
     const SsaValue &right = fn.value(b);
-    if (left.storage != right.storage) return left.storage < right.storage;
+    if (left.storage != right.storage)
+      return left.storage < right.storage;
     return left.version < right.version;
   });
   return ids;
@@ -82,7 +89,9 @@ std::vector<int> ordered(const SsaFunction &fn, const LiveSet &live) {
 class Liveness final : public Pass {
 public:
   std::string name() const override { return "liveness"; }
-  std::string description() const override { return "backward live-value sets per block"; }
+  std::string description() const override {
+    return "backward live-value sets per block";
+  }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
     BlockAnalysis<LiveSet> analysis = build_analysis(fn);
@@ -91,7 +100,8 @@ public:
     std::ostream &os = ctx.stream();
     for (const SsaBlock &block : fn.blocks()) {
       os << "    block " << block.id << " live-in:";
-      if (result.in[block.id].empty()) os << " -";
+      if (result.in[block.id].empty())
+        os << " -";
       for (int id : ordered(fn, result.in[block.id]))
         os << ' ' << ctx.name_of(fn.value(id));
       os << "\n";

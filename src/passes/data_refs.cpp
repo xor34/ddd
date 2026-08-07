@@ -18,11 +18,20 @@ std::string escape(const std::string &text) {
   std::string out;
   for (char c : text) {
     switch (c) {
-    case '\n': out += "\\n"; break;
-    case '\t': out += "\\t"; break;
-    case '"': out += "\\\""; break;
-    case '\\': out += "\\\\"; break;
-    default: out.push_back(c);
+    case '\n':
+      out += "\\n";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    case '"':
+      out += "\\\"";
+      break;
+    case '\\':
+      out += "\\\\";
+      break;
+    default:
+      out.push_back(c);
     }
   }
   return out;
@@ -37,7 +46,8 @@ public:
 
   void run(SsaFunction &fn, PassContext &ctx) override {
     if (ctx.image == nullptr || ctx.image->empty()) {
-      if (ctx.verbose) ctx.stream() << "  no image, skipping\n";
+      if (ctx.verbose)
+        ctx.stream() << "  no image, skipping\n";
       return;
     }
 
@@ -51,21 +61,26 @@ public:
 
       for (size_t i = 0; i < op.ins.size(); ++i) {
         const SsaOperand &in = op.ins[i];
-        if (!in.is_constant()) continue;
+        if (!in.is_constant())
+          continue;
         // Some constant operands are not values at all: the address space of a
         // LOAD/STORE, the userop index of a CALLOTHER.
-        if (is_space_operand(op, i)) continue;
-        if (op.opc == ghidra::CPUI_CALLOTHER && i == 0) continue;
+        if (is_space_operand(op, i))
+          continue;
+        if (op.opc == ghidra::CPUI_CALLOTHER && i == 0)
+          continue;
 
         std::string described = describe(*ctx.image, in.constant());
-        if (described.empty()) continue;
+        if (described.empty())
+          continue;
 
         ctx.annotations->comment(op, described);
         ++resolved;
       }
     });
 
-    if (ctx.verbose) ctx.stream() << "  " << resolved << " data reference(s)\n";
+    if (ctx.verbose)
+      ctx.stream() << "  " << resolved << " data reference(s)\n";
   }
 
 private:
@@ -81,7 +96,8 @@ private:
   //     Small integers alias with the low addresses; the trailing data area
   //     does not.
   static std::string describe(const Image &image, uint64_t address) {
-    if (!image.is_data(address)) return {};
+    if (!image.is_data(address))
+      return {};
 
     std::ostringstream os;
     os << "0x" << std::hex << address << " -> ";
@@ -91,7 +107,8 @@ private:
       return os.str();
     }
 
-    if (address < image.code_end()) return {};
+    if (address < image.code_end())
+      return {};
 
     if (std::optional<uint64_t> word = image.read_int(address, 8)) {
       os << "0x" << std::hex << *word << " (8 bytes)";

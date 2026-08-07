@@ -12,11 +12,11 @@
 namespace ddd {
 
 struct Dominance {
-  std::vector<int> idom;                    // -1 for the entry and for unreachable blocks
-  std::vector<std::vector<int>> children;   // dominator-tree children
-  std::vector<std::vector<int>> frontier;   // DF(b), sorted and deduplicated
-  std::vector<int> rpo;                     // reachable blocks, reverse postorder
-  std::vector<int> rpo_index;               // position in rpo, -1 if unreachable
+  std::vector<int> idom; // -1 for the entry and for unreachable blocks
+  std::vector<std::vector<int>> children; // dominator-tree children
+  std::vector<std::vector<int>> frontier; // DF(b), sorted and deduplicated
+  std::vector<int> rpo;                   // reachable blocks, reverse postorder
+  std::vector<int> rpo_index;             // position in rpo, -1 if unreachable
 
   bool reachable(int block) const { return rpo_index[block] >= 0; }
 };

@@ -36,10 +36,18 @@ void write_escaped(std::ostringstream &os, const std::string &text) {
   os << '"';
   for (char c : text) {
     switch (c) {
-    case '"': os << "\\\""; break;
-    case '\\': os << "\\\\"; break;
-    case '\n': os << "\\n"; break;
-    case '\t': os << "\\t"; break;
+    case '"':
+      os << "\\\"";
+      break;
+    case '\\':
+      os << "\\\\";
+      break;
+    case '\n':
+      os << "\\n";
+      break;
+    case '\t':
+      os << "\\t";
+      break;
     default:
       if (static_cast<unsigned char>(c) < 0x20) {
         os << "\\u" << std::hex << std::setw(4) << std::setfill('0')
@@ -52,8 +60,8 @@ void write_escaped(std::ostringstream &os, const std::string &text) {
   os << '"';
 }
 
-void write_operand(std::ostringstream &os, const PassContext &ctx, const SsaOp &op,
-                   size_t index) {
+void write_operand(std::ostringstream &os, const PassContext &ctx,
+                   const SsaOp &op, size_t index) {
   const SsaOperand &in = op.ins[index];
   os << "{";
   os << "\"text\":";
@@ -77,16 +85,19 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
   os << ",\"blocks\":[";
   bool first_block = true;
   for (const SsaBlock &block : fn.blocks()) {
-    if (!first_block) os << ",";
+    if (!first_block)
+      os << ",";
     first_block = false;
 
     const BasicBlock &raw = fn.cfg()[block.id];
     os << "{\"id\":" << block.id;
     os << ",\"start\":" << raw.start.getOffset();
     os << ",\"preds\":[";
-    for (size_t i = 0; i < raw.preds.size(); ++i) os << (i ? "," : "") << raw.preds[i];
+    for (size_t i = 0; i < raw.preds.size(); ++i)
+      os << (i ? "," : "") << raw.preds[i];
     os << "],\"succs\":[";
-    for (size_t i = 0; i < raw.succs.size(); ++i) os << (i ? "," : "") << raw.succs[i].target;
+    for (size_t i = 0; i < raw.succs.size(); ++i)
+      os << (i ? "," : "") << raw.succs[i].target;
     os << "]}";
   }
   os << "]";
@@ -94,7 +105,8 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
   os << ",\"ops\":[";
   bool first_op = true;
   fn.for_each_op([&](const SsaOp &op) {
-    if (!first_op) os << ",";
+    if (!first_op)
+      os << ",";
     first_op = false;
 
     os << "{\"id\":" << op.id;
@@ -120,7 +132,8 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
 
     os << ",\"ins\":[";
     for (size_t i = 0; i < op.ins.size(); ++i) {
-      if (i) os << ",";
+      if (i)
+        os << ",";
       write_operand(os, ctx, op, i);
     }
     os << "]}";
@@ -130,7 +143,8 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
   os << ",\"values\":[";
   for (int i = 0; i < fn.value_count(); ++i) {
     const SsaValue &value = fn.value(i);
-    if (i) os << ",";
+    if (i)
+      os << ",";
     os << "{\"id\":" << value.id;
     os << ",\"name\":";
     write_escaped(os, ctx.name_of(value));
@@ -151,7 +165,8 @@ int apply(const std::string &reply, SsaFunction &fn, PassContext &ctx) {
   int applied = 0;
 
   while (std::getline(lines, line)) {
-    if (line.empty() || line[0] == '#') continue;
+    if (line.empty() || line[0] == '#')
+      continue;
 
     std::istringstream fields(line);
     std::string verb;
@@ -164,7 +179,8 @@ int apply(const std::string &reply, SsaFunction &fn, PassContext &ctx) {
 
     std::string text;
     std::getline(fields, text);
-    if (!text.empty() && text.front() == ' ') text.erase(0, 1);
+    if (!text.empty() && text.front() == ' ')
+      text.erase(0, 1);
 
     if (verb == "comment") {
       if (id < 0 || id >= fn.op_count()) {
@@ -213,7 +229,8 @@ public:
 
     std::string reply(result.output.begin(), result.output.end());
     int applied = apply(reply, fn, ctx);
-    if (ctx.verbose) ctx.stream() << "  applied " << applied << " directive(s)\n";
+    if (ctx.verbose)
+      ctx.stream() << "  applied " << applied << " directive(s)\n";
   }
 
 private:

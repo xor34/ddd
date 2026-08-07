@@ -24,7 +24,8 @@ public:
     for (const SsaBlock &block : fn.blocks()) {
       print_header(os, fn, ctx, block);
 
-      for (const SsaOp *phi : block.phis) print_phi(os, ctx, *phi, cfg[block.id]);
+      for (const SsaOp *phi : block.phis)
+        print_phi(os, ctx, *phi, cfg[block.id]);
 
       // Group ops under the instruction they came from, so the listing reads
       // as annotated disassembly rather than a flat stream of p-code.
@@ -49,32 +50,42 @@ private:
     const BasicBlock &raw = cfg[block.id];
 
     os << "block " << block.id;
-    if (block.id == cfg.entry) os << " (entry)";
-    if (!fn.dominance().reachable(block.id)) os << " (unreachable)";
+    if (block.id == cfg.entry)
+      os << " (entry)";
+    if (!fn.dominance().reachable(block.id))
+      os << " (unreachable)";
     os << "  preds:";
-    if (raw.preds.empty()) os << " -";
-    for (int p : raw.preds) os << ' ' << p;
+    if (raw.preds.empty())
+      os << " -";
+    for (int p : raw.preds)
+      os << ' ' << p;
     os << "  succs:";
-    if (raw.succs.empty()) os << " -";
-    for (const Edge &e : raw.succs) os << ' ' << e.target << (e.conditional ? "*" : "");
+    if (raw.succs.empty())
+      os << " -";
+    for (const Edge &e : raw.succs)
+      os << ' ' << e.target << (e.conditional ? "*" : "");
     os << "\n";
 
     if (ctx.annotations != nullptr)
-      for (const std::string &comment : ctx.annotations->block_comments(block.id))
+      for (const std::string &comment :
+           ctx.annotations->block_comments(block.id))
         os << "  ; " << comment << "\n";
   }
 
   static void print_phi(std::ostream &os, const PassContext &ctx,
                         const SsaOp &phi, const BasicBlock &raw) {
-    os << "      " << (phi.out != nullptr ? ctx.name_of(*phi.out) : "?") << " = phi";
+    os << "      " << (phi.out != nullptr ? ctx.name_of(*phi.out) : "?")
+       << " = phi";
     for (size_t i = 0; i < phi.ins.size(); ++i) {
       os << (i == 0 ? " " : ", ") << ctx.name_of(phi.ins[i]);
-      if (i < raw.preds.size()) os << "@" << raw.preds[i];
+      if (i < raw.preds.size())
+        os << "@" << raw.preds[i];
     }
     print_comments(os, ctx, phi);
   }
 
-  static void print_op(std::ostream &os, const PassContext &ctx, const SsaOp &op) {
+  static void print_op(std::ostream &os, const PassContext &ctx,
+                       const SsaOp &op) {
     os << "      ";
     if (op.out != nullptr) {
       os << ctx.name_of(*op.out) << " = ";
@@ -82,11 +93,13 @@ private:
       os << ctx.name_of(op.raw_output) << " = ";
     }
     os << ghidra::get_opname(op.opc);
-    for (size_t i = 0; i < op.ins.size(); ++i) os << ' ' << ctx.name_of(op, i);
+    for (size_t i = 0; i < op.ins.size(); ++i)
+      os << ' ' << ctx.name_of(op, i);
     print_comments(os, ctx, op);
   }
 
-  static void print_comments(std::ostream &os, const PassContext &ctx, const SsaOp &op) {
+  static void print_comments(std::ostream &os, const PassContext &ctx,
+                             const SsaOp &op) {
     static const std::vector<std::string> none;
     const std::vector<std::string> &comments =
         ctx.annotations != nullptr ? ctx.annotations->comments(op) : none;

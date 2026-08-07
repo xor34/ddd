@@ -19,7 +19,9 @@ namespace {
 class PrunePhis final : public Pass {
 public:
   std::string name() const override { return "prune-phis"; }
-  std::string description() const override { return "remove phis whose result is unused"; }
+  std::string description() const override {
+    return "remove phis whose result is unused";
+  }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
     int removed = 0;
@@ -28,21 +30,24 @@ public:
       changed = false;
 
       for (SsaBlock &block : fn.blocks()) {
-        auto dead = std::remove_if(block.phis.begin(), block.phis.end(),
-                                   [](const SsaOp *phi) {
-                                     return phi->out != nullptr && phi->out->uses.empty();
-                                   });
-        if (dead == block.phis.end()) continue;
+        auto dead = std::remove_if(
+            block.phis.begin(), block.phis.end(), [](const SsaOp *phi) {
+              return phi->out != nullptr && phi->out->uses.empty();
+            });
+        if (dead == block.phis.end())
+          continue;
 
         removed += static_cast<int>(std::distance(dead, block.phis.end()));
         block.phis.erase(dead, block.phis.end());
         changed = true;
       }
 
-      if (changed) fn.rebuild_uses();
+      if (changed)
+        fn.rebuild_uses();
     }
 
-    if (ctx.verbose) ctx.stream() << "  removed " << removed << " dead phi(s)\n";
+    if (ctx.verbose)
+      ctx.stream() << "  removed " << removed << " dead phi(s)\n";
   }
 };
 

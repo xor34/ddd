@@ -72,12 +72,14 @@ Score score_spec(ghidra::Sleigh &translator, const Image &image, uint64_t addr,
 
     ++score.decoded;
     for (const PcodeOp &op : capture.ops)
-      if (is_terminator(op.opc)) ++terminators;
+      if (is_terminator(op.opc))
+        ++terminators;
     cursor += size;
   }
 
   int total = score.decoded + score.failed;
-  if (total == 0) return score;
+  if (total == 0)
+    return score;
 
   double decode_rate = static_cast<double>(score.decoded) / total;
 
@@ -106,8 +108,10 @@ std::vector<std::string> candidate_specs(const ExtractContext &ctx) {
   }
 
   std::error_code error;
-  for (const auto &entry : std::filesystem::directory_iterator(ctx.spec_dir, error))
-    if (entry.path().extension() == ".sla") specs.push_back(entry.path().string());
+  for (const auto &entry :
+       std::filesystem::directory_iterator(ctx.spec_dir, error))
+    if (entry.path().extension() == ".sla")
+      specs.push_back(entry.path().string());
 
   std::sort(specs.begin(), specs.end());
   return specs;
@@ -117,16 +121,19 @@ class ArchDetect final : public Extractor {
 public:
   std::string name() const override { return "arch-detect"; }
   std::string description() const override {
-    return "guess the instruction set by trial disassembly (slow; see --try_specs)";
+    return "guess the instruction set by trial disassembly (slow; see "
+           "--try_specs)";
   }
 
   std::vector<Finding> scan(const Image &image, ExtractContext &ctx) override {
     std::vector<Finding> findings;
-    if (image.empty()) return findings;
+    if (image.empty())
+      return findings;
 
     std::vector<std::string> specs = candidate_specs(ctx);
     if (specs.empty()) {
-      if (ctx.verbose) ctx.stream() << "  no candidate specs in " << ctx.spec_dir << "\n";
+      if (ctx.verbose)
+        ctx.stream() << "  no candidate specs in " << ctx.spec_dir << "\n";
       return findings;
     }
 
@@ -138,25 +145,30 @@ public:
     std::vector<Score> scores;
     for (const std::string &spec : specs) {
       Target *target = targets.acquire(spec);
-      if (target == nullptr) continue;
+      if (target == nullptr)
+        continue;
 
-      Score score = score_spec(*target->translator, image, image.base(), length);
+      Score score =
+          score_spec(*target->translator, image, image.base(), length);
       score.spec = std::filesystem::path(spec).stem().string();
       if (ctx.verbose)
-        ctx.stream() << "  " << score.spec << ": " << score.decoded << " decoded, "
-                     << score.failed << " failed, score " << score.value << "\n";
-      if (score.value >= kMinimumScore) scores.push_back(std::move(score));
+        ctx.stream() << "  " << score.spec << ": " << score.decoded
+                     << " decoded, " << score.failed << " failed, score "
+                     << score.value << "\n";
+      if (score.value >= kMinimumScore)
+        scores.push_back(std::move(score));
     }
 
-    std::stable_sort(scores.begin(), scores.end(),
-                     [](const Score &a, const Score &b) { return a.value > b.value; });
+    std::stable_sort(
+        scores.begin(), scores.end(),
+        [](const Score &a, const Score &b) { return a.value > b.value; });
 
     // Several specs of one family will score alike (every ARM variant decodes
     // ARM), so report the plausible ones rather than pretending to one answer.
     for (size_t i = 0; i < scores.size() && i < 5; ++i) {
       std::ostringstream detail;
-      detail << scores[i].decoded << " instructions decoded, " << scores[i].failed
-             << " failed";
+      detail << scores[i].decoded << " instructions decoded, "
+             << scores[i].failed << " failed";
 
       Finding finding;
       finding.offset = image.base();

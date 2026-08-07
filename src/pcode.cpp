@@ -19,7 +19,8 @@ bool is_terminator(OpCode opc) {
 }
 
 std::string to_string(const VarnodeData &vn) {
-  if (vn.space == nullptr) return "<null>";
+  if (vn.space == nullptr)
+    return "<null>";
 
   std::ostringstream os;
   if (is_constant(vn)) {
@@ -32,7 +33,8 @@ std::string to_string(const VarnodeData &vn) {
 }
 
 std::string to_string(const Storage &s) {
-  if (s.space == nullptr) return "<null>";
+  if (s.space == nullptr)
+    return "<null>";
 
   std::ostringstream os;
   os << s.space->getName() << ":0x" << std::hex << s.offset << ":" << std::dec

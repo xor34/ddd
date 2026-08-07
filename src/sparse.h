@@ -25,10 +25,10 @@ namespace ddd {
 template <typename Value> struct SparseAnalysis;
 
 // Operand -> fact lookup handed to transform().
-template <typename Value>
-class ValueMap {
+template <typename Value> class ValueMap {
 public:
-  ValueMap(const std::vector<Value> &values, const SparseAnalysis<Value> &analysis)
+  ValueMap(const std::vector<Value> &values,
+           const SparseAnalysis<Value> &analysis)
       : values_(values), analysis_(analysis) {}
 
   Value operator()(const SsaValue *value) const {
@@ -36,7 +36,8 @@ public:
   }
 
   Value operator()(const SsaOperand &operand) const {
-    if (operand.value != nullptr) return values_[operand.value->id];
+    if (operand.value != nullptr)
+      return values_[operand.value->id];
     return analysis_.raw ? analysis_.raw(operand.raw) : analysis_.init();
   }
 
@@ -45,8 +46,7 @@ private:
   const SparseAnalysis<Value> &analysis_;
 };
 
-template <typename Value>
-struct SparseAnalysis {
+template <typename Value> struct SparseAnalysis {
   // The "nothing known yet" fact, and the identity for merge.
   std::function<Value()> init;
   // Fact for an operand that was not SSA-renamed (constants, memory).
@@ -64,29 +64,35 @@ struct SparseAnalysis {
       [](const Value &a, const Value &b) { return a == b; };
 };
 
-template <typename Value>
-struct SparseResult {
+template <typename Value> struct SparseResult {
   std::vector<Value> values; // indexed by SsaValue::id
 
-  const Value &operator[](const SsaValue &value) const { return values[value.id]; }
-  const Value &operator[](const SsaValue *value) const { return values[value->id]; }
+  const Value &operator[](const SsaValue &value) const {
+    return values[value.id];
+  }
+  const Value &operator[](const SsaValue *value) const {
+    return values[value->id];
+  }
 };
 
 template <typename Value>
-SparseResult<Value> solve(const SsaFunction &fn, const SparseAnalysis<Value> &analysis) {
+SparseResult<Value> solve(const SsaFunction &fn,
+                          const SparseAnalysis<Value> &analysis) {
   SparseResult<Value> result;
   result.values.assign(fn.value_count(), analysis.init());
   ValueMap<Value> values(result.values, analysis);
 
   for (int i = 0; i < fn.value_count(); ++i) {
     const SsaValue &value = fn.value(i);
-    if (value.is_live_in() && analysis.live_in) result.values[i] = analysis.live_in(value);
+    if (value.is_live_in() && analysis.live_in)
+      result.values[i] = analysis.live_in(value);
   }
 
   std::deque<const SsaOp *> worklist;
   std::vector<bool> queued(fn.op_count(), false);
   fn.for_each_op([&](const SsaOp &op) {
-    if (op.out == nullptr) return;
+    if (op.out == nullptr)
+      return;
     worklist.push_back(&op);
     queued[op.id] = true;
   });
@@ -95,7 +101,8 @@ SparseResult<Value> solve(const SsaFunction &fn, const SparseAnalysis<Value> &an
     const SsaOp *op = worklist.front();
     worklist.pop_front();
     queued[op->id] = false;
-    if (op->out == nullptr) continue;
+    if (op->out == nullptr)
+      continue;
 
     Value next = analysis.init();
     if (op->is_phi) {
@@ -110,11 +117,13 @@ SparseResult<Value> solve(const SsaFunction &fn, const SparseAnalysis<Value> &an
     }
 
     Value &slot = result.values[op->out->id];
-    if (analysis.equal(slot, next)) continue;
+    if (analysis.equal(slot, next))
+      continue;
     slot = std::move(next);
 
     for (const SsaOp *user : op->out->uses) {
-      if (queued[user->id]) continue;
+      if (queued[user->id])
+        continue;
       queued[user->id] = true;
       worklist.push_back(user);
     }

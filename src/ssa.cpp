@@ -7,7 +7,8 @@
 namespace ddd {
 
 bool default_track_filter(const VarnodeData &vn) {
-  if (vn.space == nullptr) return false;
+  if (vn.space == nullptr)
+    return false;
   switch (vn.space->getType()) {
   case ghidra::IPTR_INTERNAL:
     return true; // Sleigh temporaries
@@ -21,7 +22,8 @@ bool default_track_filter(const VarnodeData &vn) {
 }
 
 std::string SsaValue::name() const {
-  if (is_live_in()) return to_string(storage) + "#in";
+  if (is_live_in())
+    return to_string(storage) + "#in";
   return to_string(storage) + "#" + std::to_string(version);
 }
 
@@ -39,23 +41,32 @@ SsaValue &SsaFunction::new_value() {
 
 void SsaFunction::for_each_op(const std::function<void(SsaOp &)> &fn) {
   for (SsaBlock &block : blocks_) {
-    for (SsaOp *phi : block.phis) fn(*phi);
-    for (SsaOp *op : block.ops) fn(*op);
+    for (SsaOp *phi : block.phis)
+      fn(*phi);
+    for (SsaOp *op : block.ops)
+      fn(*op);
   }
 }
 
-void SsaFunction::for_each_op(const std::function<void(const SsaOp &)> &fn) const {
+void SsaFunction::for_each_op(
+    const std::function<void(const SsaOp &)> &fn) const {
   for (const SsaBlock &block : blocks_) {
-    for (const SsaOp *phi : block.phis) fn(*phi);
-    for (const SsaOp *op : block.ops) fn(*op);
+    for (const SsaOp *phi : block.phis)
+      fn(*phi);
+    for (const SsaOp *op : block.ops)
+      fn(*op);
   }
 }
 
 void SsaFunction::rebuild_uses() {
-  for (SsaValue &value : values_) value.uses.clear();
+  for (SsaValue &value : values_)
+    value.uses.clear();
   for_each_op([](SsaOp &op) {
-    for (SsaOperand &in : op.ins)
-      if (in.value != nullptr) in.value->uses.push_back(&op);
+    for (SsaOperand &in : op.ins) {
+      if (in.value != nullptr) {
+        in.value->uses.push_back(&op);
+      }
+    }
   });
 }
 
@@ -64,8 +75,10 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   fn.cfg_ = &cfg;
   fn.dom_ = compute_dominance(cfg);
   fn.blocks_.resize(cfg.size());
-  for (int b = 0; b < cfg.size(); ++b) fn.blocks_[b].id = b;
-  if (cfg.empty() || cfg.entry < 0) return fn;
+  for (int b = 0; b < cfg.size(); ++b)
+    fn.blocks_[b].id = b;
+  if (cfg.empty() || cfg.entry < 0)
+    return fn;
 
   const Dominance &dom = fn.dom_;
   const auto &track = options.track;
@@ -95,15 +108,23 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       op.block = b;
       op.addr = raw.addr;
       op.opc = raw.opc;
-      for (const VarnodeData &in : raw.inputs) op.ins.push_back(SsaOperand{in, nullptr});
+
+      for (const VarnodeData &in : raw.inputs) {
+        op.ins.push_back(SsaOperand{in, nullptr});
+      }
 
       bool renamed = raw.has_output && dom.reachable(b) && track(raw.output);
       if (raw.has_output && !renamed) {
         op.has_raw_output = true;
         op.raw_output = raw.output;
       }
-      note_output(op, raw.has_output ? storage_of(raw.output) : Storage{}, renamed);
-      if (renamed) def_sites[storage_of(raw.output)].insert(b);
+
+      note_output(op, raw.has_output ? storage_of(raw.output) : Storage{},
+                  renamed);
+
+      if (renamed) {
+        def_sites[storage_of(raw.output)].insert(b);
+      }
 
       fn.blocks_[b].ops.push_back(&op);
     }
@@ -121,7 +142,8 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       worklist.pop_back();
 
       for (int d : dom.frontier[b]) {
-        if (!placed.insert(d).second) continue;
+        if (!placed.insert(d).second)
+          continue;
 
         SsaOp &phi = fn.new_op();
         phi.block = d;
@@ -132,7 +154,8 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
         note_output(phi, storage, true);
         fn.blocks_[d].phis.push_back(&phi);
 
-        if (queued.insert(d).second) worklist.push_back(d);
+        if (queued.insert(d).second)
+          worklist.push_back(d);
       }
     }
   }
@@ -148,7 +171,8 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   // every path sees the same one.
   auto live_in = [&](const Storage &storage) -> SsaValue * {
     auto it = live_ins.find(storage);
-    if (it != live_ins.end()) return it->second;
+    if (it != live_ins.end())
+      return it->second;
 
     SsaValue &value = fn.new_value();
     value.storage = storage;
@@ -169,6 +193,7 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
     size_t next_child = 0;
     std::vector<Storage> pushed;
   };
+
   std::vector<Frame> walk{Frame{cfg.entry}};
   std::vector<bool> entered(cfg.size(), false);
 
@@ -190,12 +215,15 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
         walk.back().pushed.push_back(storage);
       };
 
-      for (SsaOp *phi : fn.blocks_[b].phis) define(phi);
+      for (SsaOp *phi : fn.blocks_[b].phis)
+        define(phi);
 
       for (SsaOp *op : fn.blocks_[b].ops) {
         for (SsaOperand &in : op->ins)
-          if (track(in.raw)) in.value = current(storage_of(in.raw));
-        if (renames_output[op->id]) define(op);
+          if (track(in.raw))
+            in.value = current(storage_of(in.raw));
+        if (renames_output[op->id])
+          define(op);
       }
 
       // Hand this block's current values to the phis of every successor.
@@ -203,10 +231,12 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       // also its fall-through), so patch every matching slot.
       for (const Edge &edge : cfg[b].succs) {
         const BasicBlock &succ = cfg[edge.target];
-        if (fn.blocks_[edge.target].phis.empty()) continue;
+        if (fn.blocks_[edge.target].phis.empty())
+          continue;
 
         for (size_t i = 0; i < succ.preds.size(); ++i) {
-          if (succ.preds[i] != b) continue;
+          if (succ.preds[i] != b)
+            continue;
           for (SsaOp *phi : fn.blocks_[edge.target].phis)
             phi->ins[i].value = current(output_storage[phi->id]);
         }
@@ -219,16 +249,22 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       continue;
     }
 
-    for (const Storage &storage : top.pushed) stacks[storage].pop_back();
+    for (const Storage &storage : top.pushed)
+      stacks[storage].pop_back();
     walk.pop_back();
   }
 
   // A phi slot can still be empty if that predecessor is unreachable; give
   // it the live-in so no operand is left dangling.
-  for (SsaBlock &block : fn.blocks_)
-    for (SsaOp *phi : block.phis)
-      for (SsaOperand &in : phi->ins)
-        if (in.value == nullptr) in.value = live_in(output_storage[phi->id]);
+  for (SsaBlock &block : fn.blocks_) {
+    for (SsaOp *phi : block.phis) {
+      for (SsaOperand &in : phi->ins) {
+        if (in.value == nullptr) {
+          in.value = live_in(output_storage[phi->id]);
+        }
+      }
+    }
+  }
 
   // ---- 4. def-use chains ----
   fn.rebuild_uses();

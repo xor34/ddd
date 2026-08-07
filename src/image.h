@@ -31,7 +31,8 @@ public:
   bool big_endian() const { return big_endian_; }
 
   bool contains(uint64_t addr, size_t length = 1) const {
-    return addr >= base_ && length <= bytes_.size() && addr - base_ <= bytes_.size() - length;
+    return addr >= base_ && length <= bytes_.size() &&
+           addr - base_ <= bytes_.size() - length;
   }
 
   const uint8_t *at(uint64_t addr) const {
@@ -44,7 +45,8 @@ public:
   // A NUL-terminated run of printable characters at `addr`. Nothing is
   // returned for an empty string or one that runs off the end of the image,
   // so this stays quiet on random data.
-  std::optional<std::string> read_string(uint64_t addr, size_t max_length = 128) const;
+  std::optional<std::string> read_string(uint64_t addr,
+                                         size_t max_length = 128) const;
 
   // The range the disassembler actually walked. Everything else in the image
   // is data as far as anything here knows.
@@ -54,7 +56,9 @@ public:
   }
   uint64_t code_begin() const { return code_begin_; }
   uint64_t code_end() const { return code_end_; }
-  bool is_code(uint64_t addr) const { return addr >= code_begin_ && addr < code_end_; }
+  bool is_code(uint64_t addr) const {
+    return addr >= code_begin_ && addr < code_end_;
+  }
   bool is_data(uint64_t addr) const { return contains(addr) && !is_code(addr); }
 
 private:
@@ -69,7 +73,8 @@ private:
 // what the disassembler expects at the edges.
 class ImageLoader final : public ghidra::LoadImage {
 public:
-  explicit ImageLoader(const Image &image) : LoadImage("image"), image_(image) {}
+  explicit ImageLoader(const Image &image)
+      : LoadImage("image"), image_(image) {}
 
   void loadFill(ghidra::uint1 *dest, ghidra::int4 size,
                 const ghidra::Address &addr) override;

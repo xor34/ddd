@@ -46,12 +46,14 @@ public:
         flush();
         continue;
       }
-      if (run.empty()) run_begin = addr;
+      if (run.empty())
+        run_begin = addr;
       run.push_back(static_cast<char>(byte));
     }
     flush();
 
-    if (ctx.verbose) ctx.stream() << "  " << findings.size() << " string(s)\n";
+    if (ctx.verbose)
+      ctx.stream() << "  " << findings.size() << " string(s)\n";
     return findings;
   }
 };

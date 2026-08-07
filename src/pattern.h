@@ -46,7 +46,8 @@ public:
   bool match(const SsaOperand &operand, Match &m) const;
 
 private:
-  friend Pattern make_pattern(Kind, OpCode, uint64_t, int, std::vector<Pattern>, bool);
+  friend Pattern make_pattern(Kind, OpCode, uint64_t, int, std::vector<Pattern>,
+                              bool);
 
   bool match_operands(const SsaOp &op, Match &m) const;
 
@@ -60,10 +61,10 @@ private:
 
 namespace pat {
 
-Pattern any();                                    // anything at all
-Pattern val(int slot);                            // any SSA value, remembered in `slot`
-Pattern imm(uint64_t value);                      // exactly this constant
-Pattern cst(int slot);                            // any constant, remembered in `slot`
+Pattern any();               // anything at all
+Pattern val(int slot);       // any SSA value, remembered in `slot`
+Pattern imm(uint64_t value); // exactly this constant
+Pattern cst(int slot);       // any constant, remembered in `slot`
 Pattern op(OpCode opc, std::vector<Pattern> ins); // an op with these operands
 
 // Same as op(), but also matches with the two operands swapped.
