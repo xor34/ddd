@@ -1,3 +1,4 @@
 specs/
 build/
 .xmake/
+**/__pycache__/**

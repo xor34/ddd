@@ -54,8 +54,14 @@ struct Storage {
     return space == o.space && offset == o.offset && size == o.size;
   }
   bool operator!=(const Storage &o) const { return !(*this == o); }
+
+  // Ordered by the space's *index*, not its address: sorting on the pointer
+  // would reorder under ASLR and make every downstream result -- phi
+  // placement order, value numbering, printed output -- differ run to run.
   bool operator<(const Storage &o) const {
-    if (space != o.space) return space < o.space;
+    int index = space != nullptr ? space->getIndex() : -1;
+    int other = o.space != nullptr ? o.space->getIndex() : -1;
+    if (index != other) return index < other;
     if (offset != o.offset) return offset < o.offset;
     return size < o.size;
   }

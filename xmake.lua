@@ -118,6 +118,47 @@ target("sleigh_poc")
     add_deps("sla")
     add_packages("abseil")
 
+-- `xmake check` -- build sleigh_poc, then run the lit-style suite in test/.
+-- Extra arguments go through to the runner, e.g.
+--   xmake check --only=loop --commands
+-- (`verbose` and `diagnosis` are xmake's own option names, hence `commands`.)
+task("check")
+    set_category("plugin")
+
+    set_menu {
+        usage = "xmake check [options]",
+        description = "Run the tests in test/",
+        options = {
+            {"o", "only", "kv", nil, "Only run tests matching this regex"},
+            {"c", "commands", "k", nil, "Show the commands each test ran"}
+        }
+    }
+
+    on_run(function()
+        import("core.base.option")
+        import("core.project.project")
+        import("core.project.config")
+
+        config.load()
+        os.exec("xmake build sleigh_poc")
+
+        local argv = {
+            path.join(os.projectdir(), "test", "lit-lite.py"),
+            "--sleigh-poc=" .. project.target("sleigh_poc"):targetfile(),
+            "--specs=" .. path.join(os.projectdir(), "specs")
+        }
+
+        if option.get("only") then
+            table.insert(argv, "--filter=" .. option.get("only"))
+        end
+        if option.get("commands") then
+            table.insert(argv, "-v")
+        end
+
+        os.execv("python3", argv)
+    end)
+
+
 option("processors")
     set_default("x86,AARCH64,ARM,MIPS,PowerPC")
     set_showmenu(true)

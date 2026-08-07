@@ -10,6 +10,7 @@
 #include "../dataflow.h"
 #include "../pass.h"
 
+#include <algorithm>
 #include <ostream>
 #include <set>
 
@@ -64,6 +65,20 @@ BlockAnalysis<LiveSet> build_analysis(const SsaFunction &fn) {
   return analysis;
 }
 
+// Report in register-file order (space, offset, then version) rather than by
+// value id. Ids fall out of the order the builder happened to create values
+// in, which is an implementation detail nothing should be reading.
+std::vector<int> ordered(const SsaFunction &fn, const LiveSet &live) {
+  std::vector<int> ids(live.begin(), live.end());
+  std::sort(ids.begin(), ids.end(), [&fn](int a, int b) {
+    const SsaValue &left = fn.value(a);
+    const SsaValue &right = fn.value(b);
+    if (left.storage != right.storage) return left.storage < right.storage;
+    return left.version < right.version;
+  });
+  return ids;
+}
+
 class Liveness final : public Pass {
 public:
   std::string name() const override { return "liveness"; }
@@ -77,7 +92,8 @@ public:
     for (const SsaBlock &block : fn.blocks()) {
       os << "    block " << block.id << " live-in:";
       if (result.in[block.id].empty()) os << " -";
-      for (int id : result.in[block.id]) os << ' ' << ctx.name_of(fn.value(id));
+      for (int id : ordered(fn, result.in[block.id]))
+        os << ' ' << ctx.name_of(fn.value(id));
       os << "\n";
     }
   }

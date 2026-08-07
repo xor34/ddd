@@ -1,7 +1,8 @@
 #include "ssa.h"
 
+#include <map>
+#include <set>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace ddd {
 
@@ -83,7 +84,10 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   };
 
   // ---- 1. copy the p-code in, and collect def sites per storage ----
-  std::unordered_map<Storage, std::unordered_set<int>, StorageHash> def_sites;
+  // Ordered containers throughout: phi placement order decides the order
+  // values are numbered, so an unordered_map here would make the whole IR
+  // differ between runs.
+  std::map<Storage, std::set<int>> def_sites;
 
   for (int b = 0; b < cfg.size(); ++b) {
     for (const PcodeOp &raw : cfg[b].ops) {
@@ -109,8 +113,8 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   for (const auto &entry : def_sites) {
     const Storage &storage = entry.first;
     std::vector<int> worklist(entry.second.begin(), entry.second.end());
-    std::unordered_set<int> queued(entry.second.begin(), entry.second.end());
-    std::unordered_set<int> placed;
+    std::set<int> queued(entry.second.begin(), entry.second.end());
+    std::set<int> placed;
 
     while (!worklist.empty()) {
       int b = worklist.back();
