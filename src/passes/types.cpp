@@ -19,11 +19,13 @@
 // "is this a signed integer, an unsigned one, a boolean, or a pointer to
 // something N bytes wide", which is most of what makes a listing readable.
 #include "../pass.h"
+#include "../project.h"
 
 #include "opcodes.hh"
 
 #include <map>
 #include <ostream>
+#include <set>
 #include <sstream>
 
 namespace ddd {
@@ -120,6 +122,7 @@ public:
     evidence_.clear();
     evidence_.resize(fn.value_count());
     slots_.clear();
+    declared_.clear();
 
     gather(fn, ctx);
     spread(fn);
@@ -293,6 +296,16 @@ private:
         size = evidence.pointee != 0 ? evidence.pointee : size;
       }
 
+      // A declared type wins outright: inference is evidence, not knowledge.
+      const uint64_t function = fn.cfg().code_begin;
+      if (ctx.project != nullptr) {
+        if (const std::string *declared = ctx.project->type(function, shown)) {
+          named.emplace(shown, *declared);
+          declared_.insert(shown);
+          continue;
+        }
+      }
+
       named.emplace(shown, describe(effective, size));
     }
 
@@ -306,7 +319,9 @@ private:
     int shown = 0;
     int skipped = 0;
     for (const auto &entry : named) {
-      if (!informative(entry.second)) {
+      // A declared type is shown whatever it is: filtering it out would
+      // silently ignore what the user just typed.
+      if (declared_.count(entry.first) == 0 && !informative(entry.second)) {
         ++skipped;
         continue;
       }
@@ -335,6 +350,7 @@ private:
 
   std::vector<Evidence> evidence_;
   std::map<std::string, Evidence> slots_;
+  std::set<std::string> declared_;
 };
 
 DDD_REGISTER_PASS(Types);

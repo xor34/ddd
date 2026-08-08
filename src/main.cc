@@ -8,7 +8,9 @@
 #include "cfg.h"
 #include "elf.h"
 #include "extract.h"
+#include "hil.h"
 #include "image.h"
+#include "json.h"
 #include "pass.h"
 #include "project.h"
 #include "script.h"
@@ -89,6 +91,9 @@ ABSL_FLAG(std::string, transform, "",
           "Run the image through this script before analysing it (decryption, "
           "unpacking)");
 
+ABSL_FLAG(bool, server, false,
+          "Answer command lines on stdin with one line of JSON each; what the "
+          "web interface talks to");
 ABSL_FLAG(bool, interactive, false,
           "Start an interactive session instead of printing one listing");
 ABSL_FLAG(std::string, project, "",
@@ -103,7 +108,7 @@ ABSL_FLAG(bool, list_passes, false,
 ABSL_FLAG(std::vector<std::string>, passes,
           std::vector<std::string>({"stack-vars", "simplify", "dce", "idioms",
                                     "data-refs", "symbols", "rename",
-                                    "name-vars", "types", "user-names",
+                                    "name-vars", "user-names", "types",
                                     "calling-conv", "hil"}),
           "Passes to run over each region. Ends in `hil` for the readable "
           "expression form; swap it for `print-ssa` to see one line per p-code "
@@ -174,7 +179,8 @@ std::vector<ddd::ElfRange> choose_ranges(ddd::ElfInfo &elf) {
 
   // An interactive session chooses functions as it goes; all it needs from
   // here is somewhere to hang the target, and none of the explaining.
-  if (absl::GetFlag(FLAGS_interactive)) return executable_ranges;
+  if (absl::GetFlag(FLAGS_interactive) || absl::GetFlag(FLAGS_server))
+    return executable_ranges;
 
   const std::vector<std::string> wanted = absl::GetFlag(FLAGS_function);
 
@@ -403,11 +409,16 @@ struct Session {
   ddd::Project project;
   std::string project_path;
 
-  ddd::Region prototype; // the target every function here is lifted with
+  ddd::Region prototype;             // the target functions here are lifted with
+  std::vector<ddd::Region> regions;  // every code region, for indexing
   uint64_t seek = 0;
   bool verbose = false;
 
   std::unique_ptr<ddd::Xrefs> xrefs; // built on demand: it costs a full sweep
+
+  // Where progress and diagnostics go. In server mode this is stderr, because
+  // stdout carries the protocol and one stray line of prose corrupts it.
+  std::ostream *log = &std::cout;
 };
 
 // Anything that names a place: a symbol, or a number in any base.
@@ -434,6 +445,32 @@ const ddd::ElfRange *function_at(const Session &session, uint64_t address) {
       return &entry.second;
   }
   return nullptr;
+}
+
+// The stretch to lift at an address. A symbol gives the exact extent; without
+// one -- a flat firmware image, which is where literal pools live -- there is
+// still code there, so sweep from the address to the end of its region.
+//
+// Returned by value because the synthesised range has nowhere to live.
+bool range_at(const Session &session, uint64_t address, ddd::ElfRange &out) {
+  if (const ddd::ElfRange *known = function_at(session, address)) {
+    out = *known;
+    return true;
+  }
+
+  for (const ddd::Region &region : session.regions) {
+    if (address < region.begin || address >= region.end) continue;
+
+    out.begin = address;
+    out.end = region.end;
+    out.executable = true;
+    std::ostringstream name;
+    name << "sub_" << std::hex << address;
+    out.name = name.str();
+    return true;
+  }
+
+  return false;
 }
 
 std::string function_name_at(const Session &session, uint64_t address) {
@@ -466,25 +503,21 @@ void build_xrefs(Session &session) {
   if (session.xrefs != nullptr) return;
 
   session.xrefs = std::make_unique<ddd::Xrefs>();
-  std::cout << "analysing all references..." << std::flush;
+  *session.log << "analysing all references..." << std::flush;
 
-  for (const ddd::ElfRange &range : session.elf->ranges) {
-    if (!range.executable) continue;
-
-    ddd::Region region = session.prototype;
-    region.begin = range.begin;
-    region.end = range.end;
-
+  // Every code region, not the ELF's ranges: a flat image has no ELF ranges
+  // and its code is exactly what --region said it was.
+  for (const ddd::Region &region : session.regions) {
     // The whole range, not the per-run --max: an index that stops a third of
     // the way through .text reports "no references" for everything past the
     // cut, which is worse than not having one.
     std::unique_ptr<Lifted> lifted =
-        lift(region, range.begin, std::numeric_limits<int>::max());
+        lift(region, region.begin, std::numeric_limits<int>::max());
     if (lifted == nullptr) continue;
     session.xrefs->add(lifted->cfg, "");
   }
 
-  std::cout << " " << session.xrefs->size() << " reference(s)\n";
+  *session.log << " " << session.xrefs->size() << " reference(s)\n";
 }
 
 void print_xrefs(Session &session, uint64_t address) {
@@ -535,6 +568,376 @@ std::vector<std::string> passes_ending_in(const std::string &last) {
     if (name != "hil" && name != "print-ssa") passes.push_back(name);
   passes.push_back(last);
   return passes;
+}
+
+// ---- server -------------------------------------------------------------
+//
+// One command line in, one line of JSON out. The command vocabulary is the
+// interactive one, so there is nothing to parse here and no JSON reader in
+// this binary -- only a writer.
+//
+// A listing goes out as tokens rather than text, because a string cannot be
+// clicked on and highlighting every occurrence of a variable needs each name
+// to arrive with an identity attached.
+
+std::string tokens_json(const std::vector<ddd::TokenBlock> &blocks) {
+  std::vector<std::string> block_objects;
+
+  for (const ddd::TokenBlock &block : blocks) {
+    std::vector<std::string> lines;
+    for (const ddd::TokenLine &line : block.lines) {
+      std::vector<std::string> tokens;
+      for (const ddd::Token &token : line.tokens) {
+        ddd::json::Object object;
+        object.string_field("k", token.kind).string_field("s", token.text);
+        if (!token.id.empty()) object.string_field("id", token.id);
+        tokens.push_back(object.str());
+      }
+
+      ddd::json::Object object;
+      object.number_field("addr", line.addr)
+          .field("tokens", ddd::json::array(tokens))
+          .field("comments", ddd::json::string_array(line.comments));
+      lines.push_back(object.str());
+    }
+
+    ddd::json::Object object;
+    object.number_field("id", block.id)
+        .number_field("addr", block.addr)
+        .bool_field("entry", block.entry)
+        .field("preds", ddd::json::number_array(block.preds))
+        .field("succs", ddd::json::number_array(block.succs))
+        .field("comments", ddd::json::string_array(block.comments))
+        .field("lines", ddd::json::array(lines));
+    block_objects.push_back(object.str());
+  }
+
+  return ddd::json::array(block_objects);
+}
+
+// Defined below, next to the other JSON builders; needed by the listing,
+// which carries its references inline.
+std::string xrefs_json(Session &session, uint64_t address);
+void build_xrefs(Session &session);
+
+std::string error_json(const std::string &message) {
+  return ddd::json::Object().string_field("error", message).str();
+}
+
+// The listing for one function, tokenised.
+std::string function_json(Session &session, const ddd::ElfRange &range) {
+  ddd::Region region = session.prototype;
+  region.begin = range.begin;
+  region.end = range.end;
+
+  std::unique_ptr<Lifted> lifted = lift(region, range.begin);
+  if (lifted == nullptr) return error_json("nothing disassembles there");
+
+  ddd::PassManager manager;
+  for (const std::string &name : default_passes())
+    if (name != "print-ssa") manager.add(name);
+
+  ddd::SsaOptions options;
+  options.live_at_exit = ddd::observable_storage(region.target->abi,
+                                                 region.target->translator);
+  ddd::SsaFunction fn = ddd::build_ssa(lifted->cfg, options);
+
+  ddd::Annotations annotations;
+  ddd::PassContext ctx;
+  ctx.target = region.target;
+  ctx.image = session.image;
+  ctx.annotations = &annotations;
+  ctx.symbols = &session.elf->symbols;
+  ctx.project = &session.project;
+  ctx.out = &std::cerr; // never mixed into the response
+  ctx.verbose = false;
+  manager.run(fn, ctx);
+
+  ddd::Hil hil = ddd::build_hil(fn, ctx);
+
+  // References belong in the listing, not in a panel beside it: what jumps
+  // here is a property of the block, and IDA has put it at the label for
+  // thirty years because that is where you are looking.
+  build_xrefs(session);
+
+  const std::vector<ddd::TokenBlock> blocks = ddd::tokenize(hil, fn, ctx);
+  std::vector<std::string> block_objects;
+  for (const ddd::TokenBlock &block : blocks) {
+    std::string object = tokens_json({block});
+    // Splice the references in: tokens_json produced a one-element array.
+    object = object.substr(1, object.size() - 2);
+    object.pop_back(); // the closing brace
+    object += ",\"xrefs\":" + xrefs_json(session, block.addr) + "}";
+    block_objects.push_back(object);
+  }
+
+  return ddd::json::Object()
+      .string_field("name", range.name)
+      .number_field("addr", range.begin)
+      .number_field("end", range.end)
+      .field("blocks", ddd::json::array(block_objects))
+      .str();
+}
+
+// What refers to an address, as JSON. Shared by the `xrefs` command and by
+// the inline references a listing carries.
+std::string xrefs_json(Session &session, uint64_t address) {
+  std::vector<std::string> rows;
+  if (session.xrefs == nullptr) return ddd::json::array(rows);
+
+  for (const ddd::Xref &xref : session.xrefs->to(address))
+    rows.push_back(ddd::json::Object()
+                       .number_field("from", xref.from)
+                       .string_field("kind", xref.kind)
+                       .string_field("in", function_name_at(session, xref.from))
+                       .str());
+  return ddd::json::array(rows);
+}
+
+// Data, as items rather than a hex dump.
+//
+// A hex dump is not exploration. The thing you actually want to know about a
+// word of data is what it *is*: an ARM literal pool is a run of words sitting
+// inside the code, each one an address or a constant that some nearby
+// PC-relative load reads, and reading it as 16 bytes per row tells you none of
+// that. So each item is decoded, its value resolved against the symbols and
+// strings, and carries the references that point at it.
+std::string data_json(Session &session, uint64_t address, uint64_t count) {
+  const ddd::Image &image = *session.image;
+  if (count == 0 || count > 512) count = 64;
+
+  build_xrefs(session);
+
+  // Pointer width decides the natural item size: a literal pool on a 32-bit
+  // target is words, on a 64-bit one it is doublewords.
+  unsigned word = 4;
+  if (session.prototype.target != nullptr &&
+      session.prototype.target->translator != nullptr)
+    word = session.prototype.target->translator->getDefaultCodeSpace()->getAddrSize();
+  if (word != 4 && word != 8) word = 4;
+
+  std::vector<std::string> items;
+  uint64_t at = address;
+
+  for (uint64_t i = 0; i < count && image.contains(at); ++i) {
+    ddd::json::Object item;
+    item.number_field("addr", at);
+
+    // A symbol here names the item whatever else it turns out to be.
+    auto symbol = session.elf->symbols.find(at);
+    if (symbol != session.elf->symbols.end())
+      item.string_field("label", symbol->second);
+
+    item.field("xrefs", xrefs_json(session, at));
+
+    // A readable string is the strongest reading, and it sets its own extent.
+    if (std::optional<std::string> text = image.read_string(at); text && text->size() >= 4) {
+      item.string_field("kind", "string")
+          .number_field("size", text->size() + 1)
+          .string_field("text", *text);
+      items.push_back(item.str());
+      at += text->size() + 1;
+      continue;
+    }
+
+    std::optional<uint64_t> value = image.read_int(at, word);
+    if (!value) break;
+
+    item.string_field("kind", "word").number_field("size", word)
+        .number_field("value", *value);
+
+    // The point of a literal pool: what does this word point at?
+    if (auto target = session.elf->symbols.find(*value);
+        target != session.elf->symbols.end()) {
+      item.string_field("points", "code").string_field("target", target->second);
+    } else if (std::optional<std::string> text = image.read_string(*value)) {
+      item.string_field("points", "string").string_field("target", *text);
+    } else if (image.contains(*value) && *value != 0) {
+      item.string_field("points", image.is_code(*value) ? "code" : "data");
+    }
+
+    items.push_back(item.str());
+    at += word;
+  }
+
+  return ddd::json::Object()
+      .number_field("addr", address)
+      .number_field("end", at)
+      .bool_field("code", image.is_code(address))
+      .field("items", ddd::json::array(items))
+      .str();
+}
+
+// Bytes, for the parts of an image that are not code.
+std::string hex_json(Session &session, uint64_t address, uint64_t length) {
+  const ddd::Image &image = *session.image;
+  if (length == 0 || length > 4096) length = 256;
+
+  std::string bytes;
+  std::vector<std::string> rows;
+  static const char *digits = "0123456789abcdef";
+
+  for (uint64_t i = 0; i < length; ++i) {
+    const uint8_t *byte = image.at(address + i);
+    if (byte == nullptr) break;
+    bytes.push_back(digits[*byte >> 4]);
+    bytes.push_back(digits[*byte & 0xf]);
+  }
+
+  // Anything readable here is worth surfacing: it is usually why you are
+  // looking at raw bytes in the first place.
+  for (uint64_t i = 0; i < length; ++i) {
+    if (std::optional<std::string> text = image.read_string(address + i)) {
+      rows.push_back(ddd::json::Object()
+                         .number_field("addr", address + i)
+                         .string_field("text", *text)
+                         .str());
+      i += text->size();
+    }
+  }
+
+  return ddd::json::Object()
+      .number_field("addr", address)
+      .bool_field("code", image.is_code(address))
+      .string_field("bytes", bytes)
+      .field("strings", ddd::json::array(rows))
+      .str();
+}
+
+int server(Session &session) {
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    std::istringstream fields(line);
+    std::string verb;
+    fields >> verb;
+    if (verb.empty()) continue;
+    if (verb == "quit") break;
+
+    if (verb == "info") {
+      std::cout << ddd::json::Object()
+                       .string_field("describe", session.elf->describe())
+                       .number_field("entry", session.elf->entry)
+                       .number_field("base", session.image->base())
+                       .number_field("limit", session.image->limit())
+                       .string_field("project", session.project_path)
+                       .str();
+
+    } else if (verb == "functions") {
+      std::string pattern;
+      fields >> pattern;
+      std::vector<std::string> rows;
+      for (const auto &entry : session.elf->functions) {
+        if (entry.first != entry.second.name) continue;
+        if (!pattern.empty() && entry.first.find(pattern) == std::string::npos) continue;
+
+        const std::string *renamed = session.project.function_name(entry.second.begin);
+        rows.push_back(ddd::json::Object()
+                           .number_field("addr", entry.second.begin)
+                           .number_field("size", entry.second.end - entry.second.begin)
+                           .string_field("name", renamed != nullptr ? *renamed : entry.first)
+                           .string_field("symbol", entry.first)
+                           .str());
+      }
+      std::cout << ddd::json::Object().field("functions", ddd::json::array(rows)).str();
+
+    } else if (verb == "function") {
+      std::string where;
+      fields >> where;
+      uint64_t address = 0;
+      ddd::ElfRange range;
+      if (!resolve(session, where, address) || !range_at(session, address, range))
+        std::cout << error_json("no code at " + where);
+      else
+        std::cout << function_json(session, range);
+
+    } else if (verb == "xrefs") {
+      std::string where;
+      fields >> where;
+      uint64_t address = 0;
+      if (!resolve(session, where, address)) {
+        std::cout << error_json("cannot resolve " + where);
+      } else {
+        build_xrefs(session);
+        std::vector<std::string> rows;
+        for (const ddd::Xref &xref : session.xrefs->to(address))
+          rows.push_back(ddd::json::Object()
+                             .number_field("from", xref.from)
+                             .string_field("kind", xref.kind)
+                             .string_field("in", function_name_at(session, xref.from))
+                             .str());
+        std::cout << ddd::json::Object()
+                         .number_field("to", address)
+                         .field("refs", ddd::json::array(rows))
+                         .str();
+      }
+
+    } else if (verb == "data") {
+      std::string where, count;
+      fields >> where >> count;
+      uint64_t address = 0;
+      if (!resolve(session, where, address)) {
+        std::cout << error_json("cannot resolve " + where);
+      } else {
+        uint64_t items = 64;
+        try {
+          if (!count.empty()) items = std::stoull(count, nullptr, 0);
+        } catch (...) {
+        }
+        std::cout << data_json(session, address, items);
+      }
+
+    } else if (verb == "hex") {
+      std::string where, count;
+      fields >> where >> count;
+      uint64_t address = 0;
+      if (!resolve(session, where, address)) {
+        std::cout << error_json("cannot resolve " + where);
+      } else {
+        uint64_t length = 256;
+        try {
+          if (!count.empty()) length = std::stoull(count, nullptr, 0);
+        } catch (...) {
+        }
+        std::cout << hex_json(session, address, length);
+      }
+
+    } else if (verb == "rename" || verb == "comment" || verb == "settype") {
+      std::string where, name;
+      fields >> where;
+      uint64_t address = 0;
+      if (!resolve(session, where, address)) {
+        std::cout << error_json("cannot resolve " + where);
+      } else if (verb == "comment") {
+        std::string text;
+        std::getline(fields, text);
+        if (!text.empty() && text.front() == ' ') text.erase(0, 1);
+        session.project.set_comment(address, text);
+        std::cout << ddd::json::Object().bool_field("ok", true).str();
+      } else {
+        // rename/settype <function> <variable> <value>; an empty variable
+        // renames the function itself.
+        std::string variable, value;
+        fields >> variable;
+        std::getline(fields, value);
+        if (!value.empty() && value.front() == ' ') value.erase(0, 1);
+
+        if (verb == "settype") session.project.set_type(address, variable, value);
+        else if (variable == "-") session.project.rename_function(address, value);
+        else session.project.rename_variable(address, variable, value);
+
+        session.project.save(session.project_path);
+        std::cout << ddd::json::Object().bool_field("ok", true).str();
+      }
+
+    } else {
+      std::cout << error_json("unknown command " + verb);
+    }
+
+    std::cout << std::endl;
+  }
+
+  session.project.save(session.project_path);
+  return 0;
 }
 
 int interactive(Session &session) {
@@ -742,7 +1145,8 @@ int main(int argc, char **argv) {
       std::cerr << "ELF: " << elf.error << " (use --raw to read it flat)\n";
       return 1;
     }
-    std::cout << elf.describe() << "\n";
+    // In server mode stdout carries the protocol and nothing else.
+    (absl::GetFlag(FLAGS_server) ? std::cerr : std::cout) << elf.describe() << "\n";
   }
 
   ddd::Image image = elf.ok ? ddd::load_elf(bytes, elf)
@@ -813,9 +1217,13 @@ int main(int argc, char **argv) {
     if (region.end == 0 || region.end > image.limit())
       region.end = image.limit();
     region.kind = ddd::RegionKind::Code;
-    region.target =
-        targets.acquire(spec, absl::GetFlag(FLAGS_abi), absl::GetFlag(FLAGS_sp),
-                        absl::GetFlag(FLAGS_ctx));
+    // Through resolve_spec, like every other path: a bare name means a name
+    // in --specs. A flat blob is exactly the case that has no container to
+    // name its own architecture, so this is where --sla is most likely used.
+    region.target = targets.acquire(resolve_spec(spec, spec_dir),
+                                    absl::GetFlag(FLAGS_abi),
+                                    absl::GetFlag(FLAGS_sp),
+                                    absl::GetFlag(FLAGS_ctx));
     if (region.target == nullptr)
       return 1;
     region.name = region.target->name;
@@ -843,9 +1251,11 @@ int main(int argc, char **argv) {
   if (project_path.empty() && !path.empty()) project_path = path + ".ddd";
   if (!project_path.empty()) project.load(project_path);
 
-  if (absl::GetFlag(FLAGS_interactive)) {
-    if (!elf.ok || elf.functions.empty()) {
-      std::cerr << "interactive mode needs a container with a symbol table\n";
+  if (absl::GetFlag(FLAGS_interactive) || absl::GetFlag(FLAGS_server)) {
+    // A symbol table makes this pleasant but is not required: a flat firmware
+    // image has none, and navigating it by address is the whole job.
+    if (regions.empty()) {
+      std::cerr << "nothing to analyse: pass --sla or --region\n";
       return 2;
     }
 
@@ -857,6 +1267,8 @@ int main(int argc, char **argv) {
     session.project = std::move(project);
     session.project_path = project_path;
     session.prototype = regions.front();
+    session.regions = regions;
+    if (absl::GetFlag(FLAGS_server)) session.log = &std::cerr;
 
     // Every function is data until something is disassembled, so tell the
     // image what the container said is code before any listing is produced.
@@ -869,7 +1281,7 @@ int main(int argc, char **argv) {
     }
     if (code_end > code_begin) image.set_code_range(code_begin, code_end);
 
-    return interactive(session);
+    return absl::GetFlag(FLAGS_server) ? server(session) : interactive(session);
   }
 
   // Sweep everything first. What the sweeps actually covered -- not what the

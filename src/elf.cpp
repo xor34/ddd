@@ -474,6 +474,10 @@ Image load_elf(const std::vector<uint8_t> &file, const ElfInfo &info) {
 
 std::string ElfInfo::describe() const {
   std::ostringstream os;
+  // Every field below is a default when the parse never happened, and
+  // "ELF 32-bit LE unknown" is a confident lie about a firmware blob.
+  if (!ok) return "raw image, no container recognised";
+
   os << "ELF " << (is64 ? "64" : "32") << "-bit " << (big_endian ? "BE" : "LE") << " "
      << machine_name(machine);
   if (!spec.empty()) os << " (spec " << spec << ")";

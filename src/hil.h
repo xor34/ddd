@@ -96,6 +96,39 @@ private:
 
 Hil build_hil(const SsaFunction &fn, const PassContext &ctx);
 
+// ---- tokenised form, for a user interface -------------------------------
+//
+// A listing rendered to a string cannot be clicked on. Highlighting every
+// occurrence of a variable the way IDA does needs each name to arrive with an
+// identity attached, so the interface can match `var_c` here against `var_c`
+// there without guessing at word boundaries -- which would be wrong anyway,
+// since `RAX` appears inside `RAX_2`.
+
+struct Token {
+  std::string kind; // var, const, op, addr, punct, cast, keyword
+  std::string text;
+  std::string id;   // for kind=="var": what to highlight together
+};
+
+struct TokenLine {
+  uint64_t addr = 0;
+  std::vector<Token> tokens;
+  std::vector<std::string> comments;
+};
+
+struct TokenBlock {
+  int id = -1;
+  uint64_t addr = 0;
+  bool entry = false;
+  std::vector<int> preds;
+  std::vector<int> succs;
+  std::vector<std::string> comments;
+  std::vector<TokenLine> lines;
+};
+
+std::vector<TokenBlock> tokenize(const Hil &hil, const SsaFunction &fn,
+                                 const PassContext &ctx);
+
 // Renders the whole function, with each statement under the instruction it
 // came from and any comments the earlier passes left on it.
 std::string to_string(const Hil &hil, const SsaFunction &fn, const PassContext &ctx);

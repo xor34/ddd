@@ -691,6 +691,162 @@ void render(std::ostringstream &os, ExprRef expr, int parent_precedence) {
 
 } // namespace
 
+namespace {
+
+// Mirrors render() above, emitting tokens instead of characters. Kept as a
+// second walk rather than a shared one because the string form is the hot
+// path for batch output and threading a sink through it earned nothing.
+void emit(std::vector<Token> &out, ExprRef expr, int parent_precedence) {
+  if (expr == nullptr) {
+    out.push_back({"op", "?", ""});
+    return;
+  }
+
+  const bool parenthesise = expr->precedence < parent_precedence;
+  if (parenthesise) out.push_back({"punct", "(", ""});
+
+  switch (expr->kind) {
+  case ExprKind::Constant:
+    out.push_back({"const", expr->text, ""});
+    break;
+
+  case ExprKind::Variable:
+    // The id is the displayed name: two occurrences of one variable share it,
+    // and `RAX` and `RAX_2` do not.
+    out.push_back({"var", expr->text, expr->text});
+    break;
+
+  case ExprKind::Unary:
+    out.push_back({"op", expr->text, ""});
+    emit(out, expr->operands[0], kUnary);
+    break;
+
+  case ExprKind::Binary:
+    emit(out, expr->operands[0], expr->precedence);
+    out.push_back({"op", expr->text, ""});
+    emit(out, expr->operands[1], expr->precedence + 1);
+    break;
+
+  case ExprKind::Cast:
+    out.push_back({"cast", expr->text, ""});
+    out.push_back({"punct", "(", ""});
+    emit(out, expr->operands[0], kLowest);
+    out.push_back({"punct", ")", ""});
+    break;
+
+  case ExprKind::Load:
+    if (const std::string *slot = slot_name(expr->operands[0])) {
+      const std::string name = slot->substr(1);
+      out.push_back({"var", name, name});
+      break;
+    }
+    out.push_back({"punct", "[", ""});
+    emit(out, expr->operands[0], kLowest);
+    out.push_back({"punct", "]", ""});
+    break;
+
+  case ExprKind::Unknown:
+    out.push_back({"op", expr->text, ""});
+    if (!expr->operands.empty()) {
+      out.push_back({"punct", "(", ""});
+      for (size_t i = 0; i < expr->operands.size(); ++i) {
+        if (i) out.push_back({"punct", ",", ""});
+        emit(out, expr->operands[i], kLowest);
+      }
+      out.push_back({"punct", ")", ""});
+    }
+    break;
+  }
+
+  if (parenthesise) out.push_back({"punct", ")", ""});
+}
+
+} // namespace
+
+std::vector<TokenBlock> tokenize(const Hil &hil, const SsaFunction &fn,
+                                 const PassContext &ctx) {
+  std::vector<TokenBlock> blocks;
+  const Cfg &cfg = fn.cfg();
+
+  for (const HilBlock &block : hil.blocks()) {
+    const BasicBlock &raw = cfg[block.id];
+
+    TokenBlock out;
+    out.id = block.id;
+    out.addr = raw.start.getOffset();
+    out.entry = block.id == cfg.entry;
+    out.preds = raw.preds;
+    for (const Edge &edge : raw.succs) out.succs.push_back(edge.target);
+    if (ctx.annotations != nullptr) out.comments = ctx.annotations->block_comments(block.id);
+
+    for (const Statement &statement : block.statements) {
+      TokenLine line;
+      line.addr = statement.addr.getOffset();
+
+      switch (statement.kind) {
+      case StatementKind::Assign:
+        line.tokens.push_back({"var", statement.target_text, statement.target_text});
+        line.tokens.push_back({"op", "=", ""});
+        emit(line.tokens, statement.value, kLowest);
+        break;
+
+      case StatementKind::Store:
+        if (const std::string *slot = slot_name(statement.address)) {
+          const std::string name = slot->substr(1);
+          line.tokens.push_back({"var", name, name});
+        } else {
+          line.tokens.push_back({"punct", "[", ""});
+          emit(line.tokens, statement.address, kLowest);
+          line.tokens.push_back({"punct", "]", ""});
+        }
+        line.tokens.push_back({"op", "=", ""});
+        emit(line.tokens, statement.value, kLowest);
+        break;
+
+      case StatementKind::CondBranch:
+        line.tokens.push_back({"keyword", "if", ""});
+        line.tokens.push_back({"punct", "(", ""});
+        emit(line.tokens, statement.value, kLowest);
+        line.tokens.push_back({"punct", ")", ""});
+        line.tokens.push_back({"keyword", "goto", ""});
+        line.tokens.push_back({"block", std::to_string(statement.taken), ""});
+        if (statement.fallthrough >= 0) {
+          line.tokens.push_back({"keyword", "else goto", ""});
+          line.tokens.push_back({"block", std::to_string(statement.fallthrough), ""});
+        }
+        break;
+
+      case StatementKind::Branch:
+        line.tokens.push_back({"keyword", "goto", ""});
+        line.tokens.push_back({"block", std::to_string(statement.taken), ""});
+        break;
+
+      case StatementKind::Call:
+        line.tokens.push_back({"keyword", "call", ""});
+        emit(line.tokens, statement.value, kPrimary);
+        break;
+
+      case StatementKind::Return:
+        line.tokens.push_back({"keyword", "return", ""});
+        break;
+
+      case StatementKind::Effect:
+        emit(line.tokens, statement.value, kLowest);
+        break;
+      }
+
+      if (ctx.annotations != nullptr && statement.op != nullptr)
+        line.comments = ctx.annotations->comments(*statement.op);
+
+      out.lines.push_back(std::move(line));
+    }
+
+    blocks.push_back(std::move(out));
+  }
+
+  return blocks;
+}
+
 Hil build_hil(const SsaFunction &fn, const PassContext &ctx) {
   Hil hil;
   HilBuilder(fn, ctx, hil).run();

@@ -28,3 +28,15 @@
 
 # Both regions were lifted; neither leaked into the other.
 # CHECK-NOT: === region
+
+
+# A flat blob with no container and no --region takes its architecture from
+# --sla, and a bare name there means a name in --specs -- the same as
+# everywhere else. This is the firmware case: nothing in the file says what
+# the bytes are, so --sla is the only thing that can.
+#
+# RUN: %sleigh-poc --base=0 --bytes=a00080d2c0035fd6 --sla=AARCH64 \
+# RUN:   --specs=%specs --passes=print-ssa | FileCheck --check-prefix=FLAT %s
+
+# FLAT: === region 0x0-0x8  AARCH64 ===
+# FLAT: x0#0 = COPY 0x5

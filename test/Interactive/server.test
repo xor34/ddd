@@ -1,0 +1,78 @@
+# The server the web interface talks to: command lines in, one line of JSON
+# out. Deliberately lopsided -- there is no JSON reader in the C++ binary and
+# no serialisation library on either side.
+#
+# The listing goes out as tokens rather than text, because a string cannot be
+# clicked on, and highlighting every occurrence of a variable needs each name
+# to arrive with an identity attached. Matching by word boundary would be
+# wrong anyway: `RAX` appears inside `RAX_2`.
+#
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'static int helper(int a, int b) { return a * b + 7; }' > %t/p.c
+# RUN: echo 'int compute(int n) { int t = 0; for (int i = 0; i < n; i++) t += helper(i, n); return t; }' >> %t/p.c
+# RUN: echo 'int main(void) { return compute(5); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# RUN: printf 'info\nfunctions compute\nfunction compute\nxrefs helper\nquit\n' \
+# RUN:   | %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --server \
+# RUN:   2>/dev/null | FileCheck %s
+
+# stdout carries the protocol and nothing else -- the ELF banner and the xref
+# indexing progress both go to stderr, or one stray line of prose corrupts the
+# stream.
+# CHECK-NOT: ELF 64-bit
+# CHECK-NOT: analysing all references
+
+# CHECK: {"describe":"ELF 64-bit LE x86-64
+# CHECK-SAME: "entry":
+
+# CHECK: {"functions":[{"addr":{{[0-9]+}},"size":{{[0-9]+}},"name":"compute"
+
+# Tokens, with an id on the ones worth highlighting together.
+# CHECK: {"name":"compute"
+# CHECK-SAME: {"k":"var","s":"var_c","id":"var_c"}
+# CHECK-SAME: {"k":"op","s":"+"}
+
+# CHECK: {"to":{{[0-9]+}},"refs":[{"from":{{[0-9]+}},"kind":"call","in":"compute"}]}
+
+
+# Renaming and declaring a type both persist, and both are visible on the very
+# next request -- which is what makes the interface usable rather than a
+# viewer.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --functions \
+# RUN:   | grep -w compute | grep -oE '^  0x[0-9a-f]+' | head -1 | tr -d ' \t' > %t/addr.txt
+
+# RUN: printf 'rename ' > %t/cmds.txt
+# RUN: tr -d '\n' < %t/addr.txt >> %t/cmds.txt
+# RUN: printf ' var_c total\nsettype ' >> %t/cmds.txt
+# RUN: tr -d '\n' < %t/addr.txt >> %t/cmds.txt
+# RUN: printf ' total size_t\nfunction compute\nquit\n' >> %t/cmds.txt
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --server \
+# RUN:   < %t/cmds.txt 2>/dev/null | FileCheck --check-prefix=EDIT %s
+
+# EDIT: {"ok":true}
+# EDIT: {"ok":true}
+
+# The block comments come before the lines in the response, so check them in
+# that order -- CHECK-SAME only searches forward.
+#
+# A declared type outranks the inferred one, and is shown even though `size_t`
+# is not a type the inference would have called interesting on its own.
+# EDIT: size_t total
+
+# The rename shows in the tokens, id and all, so highlighting keeps working.
+# EDIT-SAME: {"k":"var","s":"total","id":"total"}
+
+
+# Bytes, for the parts of an image that are not code.
+# RUN: printf 'hex 0x400000 32\nquit\n' \
+# RUN:   | %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd --server \
+# RUN:   2>/dev/null | FileCheck --check-prefix=HEX %s
+
+# The bytes come back raw, with the ELF magic where it should be.
+#
+# `code` is true here, which is honest rather than precise: the first PT_LOAD
+# is the executable one and it *contains* the ELF header. Distinguishing the
+# header from .text would mean trusting section bounds over segment flags.
+# HEX: {"addr":4194304,"code":true,"bytes":"7f454c46

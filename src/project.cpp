@@ -63,8 +63,19 @@ const std::string *Project::comment(uint64_t address) const {
   return it == comments_.end() ? nullptr : &it->second;
 }
 
+void Project::set_type(uint64_t function, std::string variable, std::string type) {
+  types_[{function, std::move(variable)}] = std::move(type);
+}
+
+const std::string *Project::type(uint64_t function,
+                                 const std::string &variable) const {
+  auto it = types_.find({function, variable});
+  return it == types_.end() ? nullptr : &it->second;
+}
+
 bool Project::empty() const {
-  return functions_.empty() && variables_.empty() && comments_.empty();
+  return functions_.empty() && variables_.empty() && comments_.empty() &&
+         types_.empty();
 }
 
 bool Project::load(const std::string &path) {
@@ -99,6 +110,15 @@ bool Project::load(const std::string &path) {
         continue;
       }
       rename_variable(value, generated, tail(fields));
+    } else if (verb == "type") {
+      std::string address, variable;
+      fields >> address >> variable;
+      uint64_t value = 0;
+      if (!parse_address(address, value)) {
+        std::cerr << path << ":" << number << ": bad address\n";
+        continue;
+      }
+      set_type(value, variable, tail(fields));
     } else if (verb == "comment") {
       std::string address;
       fields >> address;
@@ -128,6 +148,9 @@ bool Project::save(const std::string &path) const {
          << entry.second << "\n";
   for (const auto &entry : comments_)
     file << "comment " << hex(entry.first) << " " << entry.second << "\n";
+  for (const auto &entry : types_)
+    file << "type " << hex(entry.first.first) << " " << entry.first.second << " "
+         << entry.second << "\n";
 
   return true;
 }

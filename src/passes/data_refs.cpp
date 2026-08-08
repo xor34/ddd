@@ -7,6 +7,7 @@
 #include "../pass.h"
 
 #include "opcodes.hh"
+#include "sleigh.hh"
 
 #include <ostream>
 #include <sstream>
@@ -70,7 +71,18 @@ public:
         if (op.opc == ghidra::CPUI_CALLOTHER && i == 0)
           continue;
 
-        std::string described = describe(*ctx.image, in.constant());
+        // A load names its own width, and the fact that the program read
+        // the address as data is better evidence than any heuristic: an ARM
+        // literal pool sits *inside* .text, where is_data() says no.
+        const bool loaded = op.opc == ghidra::CPUI_LOAD && i == 1;
+        unsigned width = pointer_width(ctx);
+        if (loaded) {
+          if (op.out != nullptr) width = op.out->storage.size;
+          else if (op.has_raw_output) width = op.raw_output.size;
+        }
+
+        std::string described =
+            describe(*ctx.image, in.constant(), width, loaded);
         if (described.empty())
           continue;
 
@@ -95,8 +107,17 @@ private:
   //   * anything else has to point past the end of everything disassembled.
   //     Small integers alias with the low addresses; the trailing data area
   //     does not.
-  static std::string describe(const Image &image, uint64_t address) {
-    if (!image.is_data(address))
+  static unsigned pointer_width(const PassContext &ctx) {
+    if (ctx.target == nullptr || ctx.target->translator == nullptr)
+      return 8;
+    return ctx.target->translator->getDefaultCodeSpace()->getAddrSize();
+  }
+
+  static std::string describe(const Image &image, uint64_t address,
+                              unsigned width, bool loaded) {
+    if (loaded ? !image.contains(address) : !image.is_data(address))
+      return {};
+    if (width == 0 || width > 8)
       return {};
 
     std::ostringstream os;
@@ -107,19 +128,24 @@ private:
       return os.str();
     }
 
-    if (address < image.code_end())
+    if (!loaded && address < image.code_end())
       return {};
 
-    if (std::optional<uint64_t> word = image.read_int(address, 8)) {
-      os << "0x" << std::hex << *word << " (8 bytes)";
-      return os.str();
-    }
-    if (std::optional<uint64_t> word = image.read_int(address, 4)) {
-      os << "0x" << std::hex << *word << " (4 bytes)";
+    std::optional<uint64_t> word = image.read_int(address, width);
+    if (!word) {
+      os << "data";
       return os.str();
     }
 
-    os << "data";
+    os << "0x" << std::hex << *word;
+
+    // One more hop, and no further: a literal pool entry is a pointer, and
+    // the thing worth reading is what it points at, not the pointer.
+    if (std::optional<std::string> text = image.read_string(*word))
+      os << " -> \"" << escape(*text) << '"';
+    else if (image.is_code(*word) && *word != 0)
+      os << " (code)";
+
     return os.str();
   }
 };

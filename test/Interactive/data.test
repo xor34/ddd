@@ -1,0 +1,78 @@
+# Data, and the references to it.
+#
+# Two things IDA does that a listing-only view cannot. First, data is
+# explorable as *items* rather than as a hex dump: what you want to know about
+# a word is what it is, and sixteen bytes to a row tells you none of that.
+# Second, references live in the listing, at the label, not in a panel beside
+# it.
+
+# An ARM literal pool: a run of words sitting inside .text, each one an
+# address or a constant that a nearby PC-relative load reads. The bytes are
+#
+#   0x00  ldr r0, [pc, #4]     ; reads 0x0c
+#   0x04  ldr r1, [pc, #4]     ; reads 0x10
+#   0x08  mov pc, lr
+#   0x0c  .word 0x14           ; -> the string
+#   0x10  .word 0xdeadbeef     ; just a constant
+#   0x14  .asciz "literal pool target"
+#
+# The region stops at 0xc, so the pool is data the sweep never walked.
+#
+# RUN: printf 'data 0xc 8\nquit\n' | %sleigh-poc --base=0 \
+# RUN:   --bytes=04009fe504109fe50ef0a0e114000000efbeadde6c69746572616c20706f6f6c2074617267657400 \
+# RUN:   --region=0:0xc:ARM7_le --specs=%specs --server 2>/dev/null \
+# RUN:   | FileCheck %s
+
+# The first pool word is decoded at the target's pointer width -- four bytes
+# here, not eight -- and resolved: it points at the string. That resolution is
+# the whole difference between exploring data and staring at it.
+# CHECK: "items":[{"addr":12,
+# CHECK-SAME: "kind":"word","size":4,"value":20,"points":"string"
+# CHECK-SAME: "target":"literal pool target"
+
+# Each item carries what refers to it, so a pool entry says which load reads
+# it without anyone having to go and look.
+# CHECK-SAME: "addr":16,"xrefs":[{"from":4,
+# CHECK-SAME: "value":3735928559
+
+# A readable string sets its own extent rather than being cut to the word
+# size, and the items resume after it.
+# CHECK-SAME: "addr":20,{{.*}}"kind":"string","size":20,"text":"literal pool target"
+
+# The pool is reachable with no symbol table and no container: firmware is the
+# case that needs this most, and it has neither.
+# CHECK-NOT: "error"
+
+
+# The same load, in the listing. The annotation follows the pointer one hop --
+# and no further, because the thing worth reading is what the pool entry points
+# at, not the pointer.
+# RUN: %sleigh-poc --base=0 \
+# RUN:   --bytes=04009fe504109fe50ef0a0e114000000efbeadde6c69746572616c20706f6f6c2074617267657400 \
+# RUN:   --region=0:0xc:ARM7_le --specs=%specs 2>/dev/null \
+# RUN:   | FileCheck --check-prefix=LOAD %s
+
+# LOAD: 0x0 {{.*}} = [0xc].4  ; 0xc -> 0x14 -> "literal pool target"
+# LOAD: 0x4 {{.*}} = [0x10].4  ; 0x10 -> 0xdeadbeef
+
+# The load is resolved even though the pool sits inside the code range: the
+# program reading the address as data is better evidence than any heuristic
+# about where data lives.
+
+
+# References, inline. Every block carries what jumps or calls to it, so the
+# listing can put them at the label the way IDA has for thirty years.
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'static int helper(int a, int b) { return a * b + 7; }' > %t/p.c
+# RUN: echo 'int compute(int n) { int t = 0; for (int i = 0; i < n; i++) t += helper(i, n); return t; }' >> %t/p.c
+# RUN: echo 'int main(void) { return compute(5); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# RUN: printf 'function helper\nquit\n' \
+# RUN:   | %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --server \
+# RUN:   2>/dev/null | FileCheck --check-prefix=REFS %s
+
+# The call site, the kind, and the function it is in -- enough to render
+# `; XREF 0x... call in compute` and to jump there.
+# REFS: {"name":"helper"
+# REFS-SAME: "xrefs":[{"from":{{[0-9]+}},"kind":"call","in":"compute"}]

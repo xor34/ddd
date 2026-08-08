@@ -32,6 +32,14 @@ public:
   void set_comment(uint64_t address, std::string text);
   const std::string *comment(uint64_t address) const;
 
+  // A type the user declared. Inference is evidence-based and therefore
+  // sometimes wrong; a person who knows the code outranks it.
+  void set_type(uint64_t function, std::string variable, std::string type);
+  const std::string *type(uint64_t function, const std::string &variable) const;
+  const std::map<std::pair<uint64_t, std::string>, std::string> &types() const {
+    return types_;
+  }
+
   bool empty() const;
 
   // The file format is one directive per line, the same vocabulary the
@@ -45,6 +53,7 @@ private:
   std::map<uint64_t, std::string> functions_;
   std::map<std::pair<uint64_t, std::string>, std::string> variables_;
   std::map<uint64_t, std::string> comments_;
+  std::map<std::pair<uint64_t, std::string>, std::string> types_;
 };
 
 } // namespace ddd

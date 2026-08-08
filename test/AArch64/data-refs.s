@@ -16,6 +16,8 @@ number:
 // CHECK: 0x1000 adr x0, 0x100c
 // CHECK: x0#0 = COPY 0x100c  ; 0x100c -> "hello, world"
 
-// Not a string, so it comes back as the word that is actually there.
+// Not a string, so it comes back as the word that is actually there, read at
+// the target's pointer width. The width is not spelled out: for a bare
+// constant like this one it is a guess, and a load says its own width anyway.
 // CHECK: 0x1004 adr x1, 0x1019
-// CHECK: x1#0 = COPY 0x1019  ; 0x1019 -> 0xcafef00d (8 bytes)
+// CHECK: x1#0 = COPY 0x1019  ; 0x1019 -> 0xcafef00d
