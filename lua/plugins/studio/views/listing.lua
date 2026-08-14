@@ -6,6 +6,13 @@
 -- to answer a question you could have answered by scrolling. So this renders a
 -- run of functions around wherever you are.
 --
+-- Nothing here waits for the analysis. Going somewhere used to mean running
+-- the pipeline over every function about to be drawn before anything appeared,
+-- which is a wait per jump and a very long one from the map, where a click can
+-- land anywhere. So the view draws what has been analysed as code and
+-- everything else as the bytes it is, says which functions it wanted, and
+-- draws those again as code when the background work reaches them.
+--
 -- Tokens arrive from the session with an identity attached rather than as a
 -- string, which is what makes the two things a listing has to do possible:
 -- colour each kind of thing differently, and light up every occurrence of the
@@ -20,11 +27,19 @@ local Gtk = gtk.Gtk
 local M = {}
 
 -- How much to render around the anchor. Enough that scrolling runs on into the
--- next function, bounded so that landing in a binary with ten thousand of them
--- does not analyse all of them before drawing anything.
+-- next function, bounded because a screenful of hexdump is still thousands of
+-- rows to paint even when none of it has to be analysed first.
 local kBefore = 1
 local kAfter = 6
 local kLineBudget = 40000
+
+-- How long to sit on the news that something on screen has been analysed.
+--
+-- The analysis reports every few milliseconds and a whole function usually
+-- lands in one of those reports, so a run of them arrives together; redrawing
+-- the listing once per report would mean redrawing it several times to show
+-- one function turning into code.
+local kSettleInterval = 250
 
 -- How much of a stretch of undefined bytes to dump before eliding the rest.
 -- Enough to recognise what it is; not so much that scrolling past a megabyte
@@ -91,6 +106,7 @@ function M.build(ui, options)
     by_id = {},         -- token id -> the places it appears
     line_of_addr = {},
     span = nil,         -- what is currently rendered: { from, to }
+    pending = {},       -- function address -> drawn as bytes, waiting for it
   }, View)
 
   self.buffer = Gtk.TextBuffer()
@@ -215,6 +231,13 @@ function M.build(ui, options)
 
   -- Both re-render, and both come back to where the user was looking rather
   -- than to where they last navigated.
+  --
+  -- Neither analyses anything, which matters most for the one that is not a
+  -- user action at all: the background sweep invalidates once, the moment it
+  -- has finished finding functions, because every listing computed against the
+  -- old reference index is now wrong. Re-analysing a screenful there is a
+  -- freeze in the middle of startup with nothing to show for it. So the same
+  -- thing happens as anywhere else -- bytes now, code shortly.
   ui:on("invalidate", function()
     self.functions = nil
     self.span = nil
@@ -224,6 +247,10 @@ function M.build(ui, options)
     self.span = nil
     safely(ui.focus or ui.addr)
   end)
+
+  -- Bytes become code here. The analysis reports as it goes; when something it
+  -- has finished is on screen as a hexdump, the same stretch is drawn again.
+  ui:on("analysis", function() self:settle() end)
 
   return self
 end
@@ -411,7 +438,13 @@ function View:render(from, to, focus)
   self.by_id = {}
   self.line_of_addr = {}
   self.painted = {}
+  self.pending = {}
   self.span = { from = from, to = to }
+
+  -- Whether to make the analysis happen or to draw what has already happened.
+  -- Only the smoke modes make it happen: they have no main loop, so nothing
+  -- would ever come along and turn the bytes into code.
+  local eager = ui.eager
 
   local paint = painter()
   local info = ui.info
@@ -424,29 +457,50 @@ function View:render(from, to, focus)
 
   for index, item in ipairs(items) do
     if item.kind == "gap" then
-      self:paint_gap(paint, item.from, item.to, focus)
+      self:paint_bytes(paint, item.from, item.to)
     else
-      local listing = ui:listing(item.func.addr, { printer = self.printer })
-      if listing and listing.ok then
-        -- Anything drawn has been through the pipeline, which is what the map
-        -- colours blue -- so scrolling counts as analysing it too.
-        ui.analysed = ui.analysed or {}
-        ui.analysed[item.func.addr] = true
+      local options = { printer = self.printer }
+      local listing = eager and ui:listing(item.func.addr, options)
+        or ui:ready(item.func.addr, options)
 
+      if listing and listing.ok then
+        -- Anything drawn from a listing has been through the pipeline, which
+        -- is what the map colours blue.
+        ui.analysed[item.func.addr] = true
         self:paint_function(paint, listing, info)
-      else
-        -- Still a line at that address, even though there is nothing to show:
-        -- navigating here has to land somewhere, or following a reference to a
-        -- stub that does not disassemble silently does nothing at all.
+      elseif listing then
+        -- Analysed, and it did not come out. Still a line at that address,
+        -- even though there is nothing to show: navigating here has to land
+        -- somewhere, or following a reference to a stub that does not
+        -- disassemble silently does nothing at all.
         self.lines[paint.line] = { addr = item.func.addr }
         self:mark_line(item.func.addr, paint.line)
 
         paint:put(item.func.name, "heading")
-        paint:put(("  0x%x  %s"):format(item.func.addr,
-                                        listing and listing.error or "?"),
+        paint:put(("  0x%x  %s"):format(item.func.addr, listing.error or "?"),
                   "comment")
         paint:newline()
         paint:newline()
+      else
+        -- Not analysed yet: what is actually there, which is bytes.
+        --
+        -- Nothing is claimed about them that has not been worked out. A
+        -- function is a name and a range until the pipeline has run over it,
+        -- and drawing it as a hexdump in the meantime is both the honest thing
+        -- and the fast one -- the byte at every address is already known, so
+        -- the view can be on screen now and become code shortly.
+        self.pending[item.func.addr] = true
+        ui:want(item.func.addr)
+
+        -- Which of the two waits this is. Until the references are indexed
+        -- nothing is lifted at all, however hard it is being looked at, so
+        -- saying "analysing" there would be a lie about something that has not
+        -- started.
+        self:paint_bytes(paint, item.func.addr,
+                         item.func.addr + math.max(1, item.func.size),
+                         { label = item.func.name,
+                           note = ui.sweeping and "indexing references"
+                             or "analysing" })
       end
     end
 
@@ -476,22 +530,31 @@ function View:render(from, to, focus)
   if self.selected_id then self:highlight(self.selected_id) end
 end
 
--- Bytes that are not code, drawn as bytes.
+-- A stretch of the image drawn as bytes.
 --
 -- Sixteen to a row with the printable ones beside them, which is not
--- exploration but is the honest thing to show for a stretch nothing has
--- decided anything about yet. The Data view decodes; this one just says what
--- is there, so that undefining a function visibly turns it back into what it
--- was made of.
-function View:paint_gap(paint, from, to, focus)
+-- exploration but is the honest thing to show for anything that has not been
+-- worked out yet. The Data view decodes; this one just says what is there, so
+-- that undefining a function visibly turns it back into what it was made of --
+-- and so that a function nothing has analysed yet can be looked at now rather
+-- than after the pipeline has run over it.
+--
+-- Two callers, and the difference between them is one line of heading: the
+-- stretches between functions, which are called whatever the region tree calls
+-- them, and functions still in the queue, which are called by their name.
+function View:paint_bytes(paint, from, to, options)
   local ui = self.ui
   local size = to - from
+  options = options or {}
 
   -- Whatever the region tree calls it, if anything does.
-  local label = "data"
-  for _, region in ipairs(ui.session.region_path(from)) do
-    if region.kind == "data" or region.kind == "item" then
-      label = region.name ~= "" and region.name or region.kind
+  local label = options.label
+  if not label then
+    label = "data"
+    for _, region in ipairs(ui.session.region_path(from)) do
+      if region.kind == "data" or region.kind == "item" then
+        label = region.name ~= "" and region.name or region.kind
+      end
     end
   end
 
@@ -504,6 +567,8 @@ function View:paint_gap(paint, from, to, focus)
   paint:put(("  0x%x-0x%x  %d byte%s"):format(from, to, size,
                                               size == 1 and "" or "s"),
             "address")
+  -- Why this is bytes rather than code, when the answer is "not yet".
+  if options.note then paint:put(("  ; %s"):format(options.note), "comment") end
   paint:newline()
 
   -- All of it.
@@ -759,6 +824,83 @@ function View:paint_function(paint, listing, info)
   paint:newline()
 end
 
+-- ---- filling in ----------------------------------------------------------
+--
+-- A listing is drawn before the analysis has reached most of what is in it, so
+-- some of what is on screen is a hexdump of a function rather than the
+-- function. When the pipeline finishes one of them it says so, and this is
+-- what turns those bytes into code.
+
+-- Has anything drawn as bytes been analysed since it was drawn?
+function View:settle()
+  local ui = self.ui
+  local turned = false
+
+  for addr in pairs(self.pending) do
+    if ui.analysed[addr] then
+      turned = true
+      break
+    end
+  end
+
+  if not turned or self.settling then return end
+  self.settling = true
+
+  gtk.GLib.timeout_add(gtk.GLib.PRIORITY_DEFAULT_IDLE, kSettleInterval,
+                       function()
+    self.settling = false
+    local ok, problem = pcall(self.restage, self)
+    if not ok then self.ui:log("listing: " .. tostring(problem)) end
+    return false
+  end)
+end
+
+-- Draw the same stretch again, in place.
+--
+-- What is on screen must not move. This happens seconds after the user
+-- navigated, while they are reading, and a listing that jumps when a
+-- background task finishes is worse than one that fills in slowly. So the
+-- address at the top of the window is put back at the top of the window --
+-- which is the only thing that can be preserved when a screenful of hexdump
+-- becomes a screenful of code and every line height changes with it.
+function View:restage()
+  local span = self.span
+  if not span then return end
+
+  local anchor = self:top_address() or self.ui.focus or self.ui.addr
+  self:render(span.from, span.to, anchor)
+
+  if anchor then
+    self:reveal(anchor, 0.0)
+    self:set_cursor(self:line_for(anchor), { no_scroll = true, at = anchor })
+  end
+  self:publish_viewport()
+end
+
+-- The address of the first line the user can actually see.
+--
+-- Read off the text view rather than off the scroll position: the map's
+-- viewport is an indicator worked out from where the scrollbar is between the
+-- first and last address painted, which is close enough to draw a mark with
+-- and not close enough to scroll back to.
+function View:top_address()
+  local ok, rect = pcall(self.view.get_visible_rect, self.view)
+  if not ok or not rect then return nil end
+
+  local got, iter = pcall(self.view.get_line_at_y, self.view, rect.y)
+  if not got or not iter or type(iter) ~= "userdata" then return nil end
+
+  -- The topmost line is often a blank one between functions, or a heading,
+  -- neither of which is about an address; the first line below it that is
+  -- about one is what the eye is on anyway.
+  local line = iter:get_line()
+  for at = line, line + 40 do
+    local record = self.lines[at]
+    if record and record.addr then return record.addr end
+  end
+  return nil
+end
+
 function View:publish_viewport()
   local ui = self.ui
   local first, last = self.painted[1], self.painted[#self.painted]
@@ -817,7 +959,10 @@ end
 -- Getting this wrong is what makes an edit look like it did nothing: the view
 -- re-renders, fails to find the line, stays at the top of the buffer, and the
 -- change is somewhere off screen.
-function View:reveal(addr)
+-- `yalign` says where in the window it should land: a third of the way down by
+-- default, which is where you want something you just jumped to, and at the
+-- very top when the point is that it must not appear to move.
+function View:reveal(addr, yalign)
   local line = self:line_for(addr)
   if not line then return end
 
@@ -840,7 +985,7 @@ function View:reveal(addr)
     self.buffer:move_mark(self.focus_mark, iter)
   end
 
-  self.view:scroll_to_mark(self.focus_mark, 0.0, true, 0.0, 0.35)
+  self.view:scroll_to_mark(self.focus_mark, 0.0, true, 0.0, yalign or 0.35)
 end
 
 -- ---- what is under the pointer -------------------------------------------

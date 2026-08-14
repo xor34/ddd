@@ -178,6 +178,60 @@ end
 
 -- ---- what is there -------------------------------------------------------
 
+-- What a listing is filed under.
+--
+-- Which printer ends the pipeline and whether the machine bookkeeping is shown
+-- are part of what a listing *is*, so they are part of the key: two views of
+-- one function are two listings, and switching between them should not re-run
+-- the analysis every time.
+local function cache_key(self, addr, options)
+  local func = self.session.function_at(addr)
+  local base = func and func.addr or addr
+
+  local printer = options.printer or "hil"
+  local machine = options.machine
+  if machine == nil then machine = self.machine or false end
+
+  return ("%d|%s|%s"):format(base, tostring(machine), printer)
+end
+
+-- The listing for `addr`, but only if it has already been analysed.
+--
+-- The difference between this and `listing` is most of how the window feels.
+-- `listing` runs the pipeline, which takes however long the function takes, so
+-- a view that calls it while painting cannot draw until it comes back -- and
+-- painting a screenful means doing that several times over before a single
+-- pixel changes. A view that asks for what is *ready* draws at once, shows
+-- bytes for the rest, and says what it wanted; see `want` below.
+function Context:ready(addr, options)
+  addr = addr or self.addr
+  if not addr then return nil end
+
+  local cached = self.cache[cache_key(self, addr, options or {})]
+  if cached and cached.generation == self.generation then return cached.listing end
+  return nil
+end
+
+-- What a view painted as bytes because the analysis had not reached it yet.
+--
+-- The background work drains this before its own queue: whatever is on screen
+-- is what someone is waiting for, and the rest of the binary can be analysed
+-- in whatever order it likes.
+function Context:want(addr)
+  if not addr or self.analysed[addr] or self.wanted_set[addr] then return end
+
+  self.wanted_set[addr] = true
+  self.wanted[#self.wanted + 1] = addr
+end
+
+function Context:take_wanted()
+  local addr = table.remove(self.wanted, 1)
+  if not addr then return nil end
+
+  self.wanted_set[addr] = nil
+  return addr
+end
+
 -- The listing for whatever function `addr` is in, kept until something the
 -- user did could have changed it. Navigating inside one function is the
 -- commonest thing there is, and re-running the pipeline for each keystroke
@@ -187,18 +241,7 @@ function Context:listing(addr, options)
   if not addr then return nil end
   options = options or {}
 
-  local func = self.session.function_at(addr)
-  local base = func and func.addr or addr
-
-  -- Which printer ends the pipeline and whether the machine bookkeeping is
-  -- shown are part of what a listing *is*, so they are part of the key: two
-  -- views of one function are two listings, and switching between them should
-  -- not re-run the analysis every time.
-  local printer = options.printer or "hil"
-  local machine = options.machine
-  if machine == nil then machine = self.machine or false end
-
-  local key = ("%d|%s|%s"):format(base, tostring(machine), printer)
+  local key = cache_key(self, addr, options)
   local cached = self.cache[key]
   if cached and cached.generation == self.generation then return cached.listing end
 
@@ -232,10 +275,18 @@ end
 
 -- Something the user did that the analysis has to be re-run to show: a rename,
 -- a comment, a declared type.
+--
+-- Nothing that was analysed still is: the cache is what "analysed" means, and
+-- a function whose listing has been thrown away has to go through the pipeline
+-- again before it can be drawn as code. So the map greys out and colours back
+-- in, and the background queue -- which skips whatever is already analysed --
+-- refills with the whole binary rather than with nothing.
 function Context:invalidate()
   self.generation = self.generation + 1
   self.cache = {}
   self.cached = {}
+  self.analysed = {}
+  self.wanted, self.wanted_set = {}, {}
   self:emit("invalidate")
   self:emit("refresh")
 end
@@ -324,6 +375,10 @@ function M.context(options)
     cache = {},
     cached = {},   -- keys in the order they were added, for eviction
     generation = 0,
+
+    analysed = {},    -- function address -> it has been through the pipeline
+    wanted = {},      -- addresses a view is waiting for, in the order asked
+    wanted_set = {},
   }, Context)
 
   -- Deliberately *not* analysing anything here. Indexing the references and

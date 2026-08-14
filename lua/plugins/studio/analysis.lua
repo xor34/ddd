@@ -16,7 +16,7 @@
 -- the UI actually needs is not to be blocked, and yielding gives that without
 -- any of it.
 --
--- Two rules make it stay out of the way:
+-- Three rules make it stay out of the way:
 --
 --   * each tick works to a deadline rather than to a count of items. A count is
 --     wrong at both ends: four small functions is a wasted frame, four large
@@ -24,6 +24,11 @@
 --   * anything the user just did wins. Marking bytes as code invalidates the
 --     reference index, and the work to rebuild it must not be queued in front
 --     of the keystroke that comes next.
+--   * whatever is on screen is analysed before anything else. The views no
+--     longer wait for the pipeline -- they draw the bytes and ask -- so this
+--     queue is the only thing standing between a hexdump and the listing that
+--     replaces it, and the order it runs in is what the user experiences as
+--     speed.
 local gtk = require "plugins.studio.gtk"
 local ddd = require "ddd"
 
@@ -51,13 +56,25 @@ local kIdlePoll = 700
 local function now() return ddd.ui.clock() end
 
 function M.start(ui)
-  ui.analysed = ui.analysed or {}
   ui.progress = { stage = "starting", done = 0, total = 0 }
 
   local function announce(stage, done, total, message)
     ui.progress = { stage = stage, done = done, total = total }
     ui:emit("analysis", ui.progress)
     if message then ui:status(message) end
+  end
+
+  -- Something happened without the count changing: a function on screen has
+  -- turned from bytes into code, which is news to the listing and to the map
+  -- and to nothing else.
+  local function report() ui:emit("analysis", ui.progress) end
+
+  -- Running the pipeline over one function. Asking for its listing is what
+  -- runs it; the context keeps the result, so drawing that function -- now or
+  -- when the user scrolls back to it -- is a lookup.
+  local function analyse(addr)
+    local ok, listing = pcall(ui.listing, ui, addr)
+    if ok and listing and listing.ok then ui.analysed[addr] = true end
   end
 
   -- The functions still to put through the pipeline, rebuilt whenever the set
@@ -82,6 +99,7 @@ function M.start(ui)
   end
 
   local sweeping = true
+  ui.sweeping = true
 
   GLib.timeout_add(GLib.PRIORITY_LOW, 16, function()
     -- Whatever the user just did comes first. This is a single thread: the
@@ -96,34 +114,61 @@ function M.start(ui)
     -- image, and both hand back control between slices. An edit puts this back
     -- into `sweeping` -- the index it invalidated has to be rebuilt, and the
     -- one already there answers questions meanwhile.
+    --
+    -- Nothing is lifted while this runs, however much someone is looking at it.
+    -- A function analysed before the index exists is analysed without it: no
+    -- references at its label, no idea what the calls in it are calls to, names
+    -- that come from nowhere. And it does not survive either -- finishing the
+    -- sweep invalidates every listing computed against what was there before,
+    -- because that is what invalidating is for. So lifting here buys a worse
+    -- reading of one function, twice, and it does it by taking time away from
+    -- the sweep that everything else is waiting on. Bytes until it is done.
     if sweeping then
       local step
       repeat
-        step = ui.session.analyse_step(1500)
+        step = ui.session.analyse_step(100)
       until step.finished or now() >= deadline
 
       announce(step.stage, step.done, step.total)
       if not step.finished then return true end
 
       sweeping = false
+      ui.sweeping = false
       ui:invalidate()
       refill()
       announce("analysing", 0, #queue)
       return true
     end
 
-    -- Phase two: each function through the pipeline. Asking for the listing is
-    -- what runs it; the context keeps it, so looking at that function later is
-    -- instant.
+    -- What is on screen, before anything else.
+    --
+    -- This is the queue-jumping that navigating used to do by simply doing the
+    -- work itself, and it is the same idea without the wait: the view is
+    -- already up, showing bytes where those functions are, and this is what
+    -- turns them into code.
+    local jumped = false
+    local addr = ui:take_wanted()
+    while addr do
+      analyse(addr)
+      jumped = true
+      if now() >= deadline then break end
+      addr = ui:take_wanted()
+    end
+
+    if jumped then
+      report()
+      return true
+    end
+
+    -- Phase two: everything else, in whatever order the queue has it. Nothing
+    -- waits on this -- the listing draws bytes for anything it has not reached
+    -- -- so it is only a matter of how soon scrolling somewhere finds code
+    -- already there.
     if at <= #queue then
       repeat
-        local addr = queue[at]
+        local next_addr = queue[at]
         at = at + 1
-
-        if addr then
-          local ok, listing = pcall(ui.listing, ui, addr)
-          if ok and listing and listing.ok then ui.analysed[addr] = true end
-        end
+        if next_addr then analyse(next_addr) end
       until at > #queue or now() >= deadline
 
       announce("analysing", at - 1, #queue)
@@ -140,6 +185,7 @@ function M.start(ui)
     local step = ui.session.analyse_step(1)
     if not step.finished then
       sweeping = true
+      ui.sweeping = true
       return true
     end
 

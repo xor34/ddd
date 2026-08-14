@@ -358,6 +358,12 @@ function M.open(ui)
     if os.getenv("DDD_SMOKE") then
       -- No main loop here, so the background stages never fire; the map's
       -- snapshot does the same work synchronously for the tests that need it.
+      --
+      -- And the listing is told to analyse what it draws rather than to draw
+      -- bytes and wait for something that will never happen: the point of
+      -- these modes is to run the pipeline over real functions and render the
+      -- result, which is exactly what the window does not do on its own now.
+      ui.eager = true
       ui:navigate(ui.addr or info.entry, { replace = true })
       io.write("studio: built\n")
 

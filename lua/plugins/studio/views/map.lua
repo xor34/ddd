@@ -8,7 +8,9 @@
 --
 -- Analysis runs on startup rather than when you scroll to something: the strip
 -- fills in as it goes, and by the time you have looked at the first function
--- the references and the rest of the listing are there.
+-- the references and the rest of the listing are there. Grey is not "nothing
+-- here" but "not read yet", and the listing shows exactly that -- the bytes --
+-- for anything the strip has not coloured in.
 local gtk = require "plugins.studio.gtk"
 local ddd = require "ddd"
 
@@ -64,9 +66,11 @@ function M.build(ui)
   -- drag to sweep through it. That is how you get from "there is something odd
   -- two thirds of the way down" to looking at it.
   --
-  -- Going somewhere means analysing what is there, so a drag cannot do it once
-  -- per motion event. Positions are coalesced: one navigation per interval,
-  -- and whatever the last position was when the finger came up.
+  -- Going somewhere no longer means analysing what is there -- the listing
+  -- draws the bytes and the analysis catches up -- but it still means painting
+  -- a screenful, which is thousands of rows when the screenful is a hexdump.
+  -- Positions are coalesced: one navigation per interval, and whatever the
+  -- last position was when the finger came up.
   local function address_at(y)
     local height = self.area:get_height()
     if height <= 0 then return nil end
@@ -150,7 +154,6 @@ end
 
 function Map:snapshot(path, width, height)
   local ui = self.ui
-  ui.analysed = ui.analysed or {}
 
   for _, func in ipairs(ui.session.functions()) do
     local ok, listing = pcall(ui.listing, ui, func.addr)
@@ -217,8 +220,6 @@ function Map:recount()
   local ui = self.ui
   self.known = {}
   self.analysed = {}
-
-  ui.analysed = ui.analysed or {}
 
   for _, func in ipairs(ui.session.functions()) do
     local first = self:bucket(func.addr)
