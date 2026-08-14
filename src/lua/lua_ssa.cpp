@@ -103,7 +103,9 @@ void new_class(lua_State *L, const char *name, const char *short_name,
     luaL_setfuncs(L, methods, 0);
 
   lua_pushvalue(L, -1);
-  lua_setfield(L, LUA_REGISTRYINDEX, methods_key(short_name).c_str());
+
+  std::string key = methods_key(short_name);
+  lua_setfield(L, LUA_REGISTRYINDEX, key.c_str());
 
   lua_pushcclosure(L, properties, 1);
   lua_setfield(L, -2, "__index");
@@ -934,7 +936,7 @@ void open_ssa(lua_State *L) {
   // Every p-code opcode by name, so a plugin can write `ddd.opcodes.INT_XOR`
   // and find out at load time that it misspelled it rather than at match time.
   lua_createtable(L, 0, ghidra::CPUI_MAX);
-  for (int opc = 1; opc < ghidra::CPUI_MAX; ++opc) {
+  for (int opc = 1; opc < ghidra::CPUI_MAX - 1; ++opc) {
     const char *name = ghidra::get_opname(static_cast<ghidra::OpCode>(opc));
     if (name == nullptr)
       continue;
