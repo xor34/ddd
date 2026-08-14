@@ -12,7 +12,7 @@ local M = {}
 
 -- Long enough to be everything in most binaries and short enough that building
 -- the rows stays instant; the filter is how you find one in a big one.
-local kMaxRows = 3000
+local kMaxRows = ddd.ui.limits.functions
 
 function M.build(ui)
   local self = { ui = ui }

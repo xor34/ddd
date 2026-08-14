@@ -3,9 +3,9 @@
 #include "sleigh.hh"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
-#include <limits>
 #include <sstream>
 
 namespace ddd {
@@ -208,107 +208,231 @@ void Session::define_function(uint64_t begin, uint64_t end, std::string name) {
   range.executable = true;
   found_[begin] = std::move(range);
 
+  // A function that starts inside another one ends it: those bytes are this
+  // function's now. Shrinking the old region first is also what stops the new
+  // one being filed *inside* it, which would leave the breadcrumb saying you
+  // are in the function you just replaced -- and take its stale blocks with
+  // it, since they describe control flow that is no longer being claimed.
+  const int enclosing = tree_.enclosing(begin, region_kind::kFunction);
+  if (enclosing >= 0 && tree_.address(enclosing) < begin)
+    tree_.resize(enclosing, begin - tree_.address(enclosing));
+
   tree_.add(begin, end - begin, region_kind::kFunction, std::move(name));
 }
 
-void Session::discover_functions() {
-  if (discovered_)
-    return;
-  discovered_ = true;
+// Everything anything calls, plus the entry point, plus whatever the symbol
+// table did know -- a partially stripped file has some of each.
+void Session::collect_starts() {
+  starts_.clear();
+  start_at_ = 0;
 
-  build_xrefs();
-
-  // Everything anything calls, plus the entry point, plus whatever the symbol
-  // table did know -- a partially stripped file has some of each.
-  std::vector<uint64_t> starts = xrefs_ != nullptr ? xrefs_->call_targets()
-                                                   : std::vector<uint64_t>();
+  if (xrefs_ != nullptr)
+    starts_ = xrefs_->call_targets();
   if (elf_->entry != 0)
-    starts.push_back(elf_->entry);
+    starts_.push_back(elf_->entry);
   for (const auto &entry : elf_->functions)
     if (entry.first == entry.second.name)
-      starts.push_back(entry.second.begin);
+      starts_.push_back(entry.second.begin);
   for (const Region &region : regions_)
-    starts.push_back(region.begin);
+    starts_.push_back(region.begin);
 
-  // Only starts that are in something we know how to lift.
-  auto region_of = [&](uint64_t address) -> const Region * {
-    for (const Region &region : regions_)
-      if (address >= region.begin && address < region.end)
-        return &region;
-    return nullptr;
-  };
+  std::sort(starts_.begin(), starts_.end());
+  starts_.erase(std::unique(starts_.begin(), starts_.end()), starts_.end());
+}
 
-  std::sort(starts.begin(), starts.end());
-  starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+// One candidate start: bound it, work out where it really ends, name it.
+bool Session::bound_start(size_t index) {
+  const uint64_t address = starts_[index];
 
-  int found = 0;
-  for (size_t i = 0; i < starts.size(); ++i) {
-    const Region *region = region_of(starts[i]);
-    if (region == nullptr)
-      continue;
+  const Region *region = nullptr;
+  for (const Region &candidate : regions_)
+    if (address >= candidate.begin && address < candidate.end)
+      region = &candidate;
+  if (region == nullptr)
+    return false;
 
-    // The next start is an upper bound: whatever this function is, it stops
-    // before the next thing anybody calls.
-    uint64_t end = region->end;
-    if (i + 1 < starts.size() && starts[i + 1] > starts[i] &&
-        starts[i + 1] < end)
-      end = starts[i + 1];
+  // Something the user has already said is not a function.
+  if (project_.is_undefined(address))
+    return false;
 
-    if (end <= starts[i])
-      continue;
-    // Something the user has already said is not a function.
-    if (project_.is_undefined(starts[i]))
-      continue;
+  // The next start is an upper bound: whatever this function is, it stops
+  // before the next thing anybody calls.
+  uint64_t end = region->end;
+  if (index + 1 < starts_.size() && starts_[index + 1] > address &&
+      starts_[index + 1] < end)
+    end = starts_[index + 1];
+  if (end <= address)
+    return false;
 
-    // And then control flow says where it really stops. A linear sweep runs
-    // straight past a `ret` into whatever was laid out next, and everything it
-    // picks up that way is unreachable from the entry -- so the last address
-    // reachable from the entry is the end of the function.
-    Region bounded = *region;
-    bounded.begin = starts[i];
-    bounded.end = end;
-    if (std::unique_ptr<Lifted> lifted =
-            lift(bounded, starts[i], max_instructions_, image_)) {
-      if (uint64_t reached = reachable_end(lifted->cfg); reached > starts[i])
-        end = reached;
-    }
-
-    std::ostringstream name;
-    auto symbol = elf_->symbols.find(starts[i]);
-    if (symbol != elf_->symbols.end())
-      name << symbol->second;
-    else
-      name << "sub_" << std::hex << starts[i];
-
-    define_function(starts[i], end, name.str());
-    ++found;
+  // And then control flow says where it really stops. A linear sweep runs
+  // straight past a `ret` into whatever was laid out next, and everything it
+  // picks up that way is unreachable from the entry -- so the last address
+  // reachable from the entry is the end of the function.
+  Region bounded = *region;
+  bounded.begin = address;
+  bounded.end = end;
+  if (std::unique_ptr<Lifted> lifted =
+          lift(bounded, address, max_instructions_, image_)) {
+    if (uint64_t reached = reachable_end(lifted->cfg); reached > address)
+      end = reached;
   }
 
-  log() << found << " function(s) found\n";
+  std::ostringstream name;
+  auto symbol = elf_->symbols.find(address);
+  if (symbol != elf_->symbols.end())
+    name << symbol->second;
+  else
+    name << "sub_" << std::hex << address;
+
+  define_function(address, end, name.str());
+  return true;
+}
+
+Session::AnalysisStep Session::analyse_step(int budget) {
+  AnalysisStep step;
+
+  if (xrefs_ == nullptr) {
+    xrefs_ = std::make_unique<Xrefs>();
+    index_region_ = 0;
+    index_at_ = 0;
+    indexed_ = false;
+  }
+
+  // Stage one: index the references, a slice of instructions at a time. The
+  // slices are where the yielding happens -- a sweep of a megabyte of .text is
+  // one call that returns when it is good and ready.
+  if (!indexed_) {
+    step.stage = "references";
+
+    while (index_region_ < regions_.size()) {
+      const Region &region = regions_[index_region_];
+      const uint64_t from = index_at_ != 0 ? index_at_ : region.begin;
+
+      if (region.target == nullptr || from >= region.end) {
+        ++index_region_;
+        index_at_ = 0;
+        continue;
+      }
+
+      std::unique_ptr<Lifted> lifted = lift(region, from, budget, image_);
+      if (lifted == nullptr) {
+        ++index_region_;
+        index_at_ = 0;
+        continue;
+      }
+
+      xrefs_->add(lifted->cfg, "");
+
+      // Where the sweep actually stopped; if it made no progress, give up on
+      // this region rather than spin.
+      const uint64_t next = lifted->cfg.code_end;
+      if (next <= from) {
+        ++index_region_;
+        index_at_ = 0;
+        continue;
+      }
+
+      index_at_ = next;
+      step.done = next - region.begin;
+      step.total = region.end - region.begin;
+      return step;
+    }
+
+    indexed_ = true;
+    log() << xrefs_->size() << " reference(s)\n";
+    collect_starts();
+    step.done = 0;
+    step.total = starts_.size();
+    return step;
+  }
+
+  // Stage two: bound each candidate. One lift each, so a handful per call.
+  if (!discovered_) {
+    step.stage = "functions";
+    step.total = starts_.size();
+
+    for (int done = 0; done < 8 && start_at_ < starts_.size(); ++done)
+      bound_start(start_at_++);
+
+    step.done = start_at_;
+    if (start_at_ < starts_.size())
+      return step;
+
+    discovered_ = true;
+    log() << found_.size() << " function(s) found\n";
+  }
+
+  step.stage = "done";
+  step.done = found_.size();
+  step.total = found_.size();
+  step.finished = true;
+  return step;
+}
+
+void Session::discover_functions() {
+  // The same work, without yielding: what a script or the protocol wants,
+  // where there is no window to keep answering.
+  while (!analyse_step().finished) {
+  }
 }
 
 const ElfRange *Session::function_at(uint64_t address) const {
-  // A symbol says exactly where a function begins and ends; nothing worked out
-  // from references beats that, so it is asked first.
+  // The most specific one wins: of every function containing this address, the
+  // one that starts latest.
+  //
+  // Not "the symbol table first". Defining a function part-way into one that
+  // already exists is a deliberate statement about those bytes -- a tail call
+  // landed in the middle of something, or a symbol covers two functions -- and
+  // an answer of "you are in the outer one" makes the new function invisible
+  // everywhere it matters: the listing shows the outer one's body, the SSA
+  // view lists the outer one, and nothing appears to have happened.
+  const ElfRange *best = nullptr;
+
+  auto it = found_.upper_bound(address);
+  if (it != found_.begin()) {
+    --it;
+    if (address >= it->second.begin && address < it->second.end)
+      best = &it->second;
+  }
+
   for (const auto &entry : elf_->functions) {
     if (entry.first != entry.second.name)
       continue; // skip the mangled alias
     if (project_.is_undefined(entry.second.begin))
       continue; // and what a person said is not one
-    if (address >= entry.second.begin && address < entry.second.end)
-      return &entry.second;
+    if (address < entry.second.begin || address >= entry.second.end)
+      continue;
+
+    if (best == nullptr || entry.second.begin > best->begin)
+      best = &entry.second;
   }
 
-  // The last discovered start at or before the address, if the extent it was
-  // given covers it.
-  auto it = found_.upper_bound(address);
-  if (it != found_.begin()) {
-    --it;
-    if (address >= it->second.begin && address < it->second.end)
-      return &it->second;
+  return best;
+}
+
+// The next function that starts after `address`, or `limit`.
+//
+// A function's listing stops where the next one begins, whatever its own
+// recorded extent says: those bytes belong to the function that starts there.
+uint64_t Session::next_function_after(uint64_t address, uint64_t limit) const {
+  for (auto it = found_.upper_bound(address);
+       it != found_.end() && it->first < limit; ++it) {
+    if (project_.is_undefined(it->first))
+      continue;
+    limit = it->first;
+    break;
   }
 
-  return nullptr;
+  for (const auto &entry : elf_->functions) {
+    if (entry.first != entry.second.name)
+      continue;
+    if (project_.is_undefined(entry.second.begin))
+      continue;
+    if (entry.second.begin > address && entry.second.begin < limit)
+      limit = entry.second.begin;
+  }
+
+  return limit;
 }
 
 std::string Session::function_name_at(uint64_t address) const {
@@ -333,14 +457,31 @@ bool Session::range_at(uint64_t address, ElfRange &out) const {
       continue;
 
     out.begin = address;
-    // Bounded by the next function that *is* known, not by the end of the
-    // region: sweeping from an unattributed address to the end of .text
-    // produces one "function" containing every function after it, and every
-    // analysis downstream is per-function.
+    // Bounded by the next thing that is known, not by the end of the region:
+    // sweeping from an unattributed address to the end of .text produces one
+    // "function" containing every function after it, and every analysis
+    // downstream is per-function.
+    //
+    // Three bounds, cheapest first, because this is asked before discovery has
+    // run -- an interface draws its first listing while the sweep that would
+    // answer this properly is still going.
     out.end = region.end;
+
     if (auto next = found_.upper_bound(address);
         next != found_.end() && next->first < out.end)
       out.end = next->first;
+
+    // The symbol table costs nothing to consult and is usually right.
+    if (auto next = elf_->symbols.upper_bound(address);
+        next != elf_->symbols.end() && next->first < out.end)
+      out.end = next->first;
+
+    // And a limit, for a stripped image with nothing to go on yet. A function
+    // longer than this is rare; one that looks longer than this is usually the
+    // rest of the segment.
+    constexpr uint64_t kUnknownFunctionLimit = 4096;
+    if (out.end - address > kUnknownFunctionLimit)
+      out.end = address + kUnknownFunctionLimit;
 
     out.executable = true;
 
@@ -370,6 +511,12 @@ Listing Session::listing(const ElfRange &range, const ListingRequest &request) {
     listing.error = "no instruction set for this address";
     return listing;
   }
+  // Stop where the next function begins. Defining one part-way into this one
+  // is what makes that differ from its recorded extent, and without this both
+  // would be listed, each showing the other's code.
+  region.end = next_function_after(range.begin, region.end);
+  listing.end = region.end;
+
   region.name = range.name + " (" + region.target->name + ")";
   listing.target = region.target->name;
 
@@ -473,26 +620,13 @@ Listing Session::listing_at(uint64_t address, const ListingRequest &request) {
 }
 
 void Session::build_xrefs() {
-  if (xrefs_ != nullptr)
+  if (indexed_)
     return;
 
-  xrefs_ = std::make_unique<Xrefs>();
-  log() << "analysing all references..." << std::flush;
-
-  // Every code region, not the ELF's ranges: a flat image has no ELF ranges
-  // and its code is exactly what --region said it was.
-  for (const Region &region : regions_) {
-    // The whole range, not the per-run limit: an index that stops a third of
-    // the way through .text reports "no references" for everything past the
-    // cut, which is worse than not having one.
-    std::unique_ptr<Lifted> lifted =
-        lift(region, region.begin, std::numeric_limits<int>::max(), image_);
-    if (lifted == nullptr)
-      continue;
-    xrefs_->add(lifted->cfg, "");
-  }
-
-  log() << " " << xrefs_->size() << " reference(s)\n";
+  // Indexing runs to completion here; analyse_step() is the version that
+  // yields, for a caller with a window to keep drawing.
+  while (!indexed_)
+    analyse_step();
 }
 
 const std::vector<Xref> &Session::xrefs_to(uint64_t address) {
@@ -509,8 +643,9 @@ DataView Session::data(uint64_t address, uint64_t count) {
   if (count == 0 || count > 512)
     count = 64;
 
-  build_xrefs();
-
+  // Whatever references are already indexed; this does not wait for the sweep
+  // that would find the rest, so opening a data view is instant.
+  //
   // Pointer width decides the natural item size: a literal pool on a 32-bit
   // target is words, on a 64-bit one it is doublewords.
   unsigned word = 4;
@@ -662,6 +797,49 @@ bool Session::sweep_region(uint64_t address, Region &out) const {
   return false;
 }
 
+// The stretches marked as data that cover an address.
+//
+// Captured before the marks are cleared, so that what the new code does not
+// cover can be put back around it.
+std::vector<std::pair<uint64_t, uint64_t>>
+Session::data_over(uint64_t address) const {
+  std::vector<std::pair<uint64_t, uint64_t>> found;
+  for (const auto &range : project_.data_ranges())
+    if (address >= range.first && address < range.second)
+      found.emplace_back(range.first, range.second);
+  return found;
+}
+
+// Marks a stretch as data without disturbing anything else. What `define_data`
+// does minus the part that decides nothing in there is a function -- because
+// this is used to rebuild the parts of a region that a new function did not
+// take, and the function is the thing that must survive.
+void Session::mark_data_region(uint64_t begin, uint64_t end) {
+  if (end <= begin)
+    return;
+
+  image_->mark_data(begin, end);
+  project_.mark_data(begin, end);
+  tree_.set_user_defined(
+      tree_.add(begin, end - begin, region_kind::kData, "data"), true);
+}
+
+// Defining code inside a stretch of data splits it, rather than deleting it: a
+// jump table with one routine wrongly in the middle of it is still a jump
+// table on both sides, and losing the marking on all of it because one part
+// was corrected is the sort of thing that makes people stop correcting
+// anything.
+void Session::restore_data_around(
+    const std::vector<std::pair<uint64_t, uint64_t>> &ranges, uint64_t begin,
+    uint64_t end) {
+  for (const auto &range : ranges) {
+    if (range.first < begin)
+      mark_data_region(range.first, begin);
+    if (range.second > end)
+      mark_data_region(end, range.second);
+  }
+}
+
 // Puts the bytes back in play: drops the marks that said they were not code,
 // and everything that was built on top of them.
 void Session::clear_data_over(uint64_t begin, uint64_t end) {
@@ -687,7 +865,9 @@ uint64_t Session::define_code(uint64_t address) {
     return 0;
 
   // Anything saying these bytes are not code has to go before the sweep is
-  // asked to read them, since that is exactly what it stops on.
+  // asked to read them, since that is exactly what it stops on -- but only the
+  // part the block turns out to occupy.
+  const std::vector<std::pair<uint64_t, uint64_t>> covering = data_over(address);
   clear_data_over(address, address + 1);
 
   std::unique_ptr<Lifted> lifted =
@@ -706,6 +886,8 @@ uint64_t Session::define_code(uint64_t address) {
   name << "loc_" << std::hex << address;
   define_region(address, end - address, region_kind::kBlock, name.str());
 
+  restore_data_around(covering, address, end);
+
   save_project();
   return end;
 }
@@ -715,6 +897,7 @@ uint64_t Session::define_function_at(uint64_t address) {
   if (!sweep_region(address, region))
     return 0;
 
+  const std::vector<std::pair<uint64_t, uint64_t>> covering = data_over(address);
   clear_data_over(address, address + 1);
   // It may have been undefined before; saying it is a function is saying that
   // was wrong.
@@ -748,13 +931,33 @@ uint64_t Session::define_function_at(uint64_t address) {
     name = generated.str();
   }
 
-  define_function(address, end, std::move(name));
+  define_function(address, end, name);
+
+  // Whatever of the data region the function did not take is still data.
+  restore_data_around(covering, address, end);
+
+  // Recorded, because this one is a decision rather than a finding: discovery
+  // will not produce it again next time -- nothing calls it, or it would have
+  // been found already -- so without this it is gone on reload.
+  project_.add_mark(
+      Project::Mark{address, end, region_kind::kFunction, std::move(name)});
+
   save_project();
   return end;
 }
 
 int Session::define_region(uint64_t address, uint64_t size,
                            const std::string &kind, const std::string &name) {
+  // A function is not only a region: the listing is cut up by the function
+  // table, so marking one as a region and nothing else would put it in the
+  // breadcrumb and nowhere else.
+  if (kind == region_kind::kFunction) {
+    define_function(address, address + size, name);
+    project_.add_mark(Project::Mark{address, address + size, kind, name});
+    save_project();
+    return tree_.enclosing(address, region_kind::kFunction);
+  }
+
   const int id = tree_.add(address, size, kind, name);
   if (id < 0)
     return -1;
@@ -804,6 +1007,16 @@ void Session::define_data(uint64_t begin, uint64_t end) {
   // is stale too -- it was built by disassembling bytes that are not code.
   for (auto it = found_.lower_bound(begin); it != found_.end() && it->first < end;)
     it = found_.erase(it);
+
+  // Including the ones the symbol table named. A symbol is evidence and this
+  // is a person; leaving them would put functions in the list that cannot be
+  // disassembled, since the sweep now stops at their first byte.
+  for (const auto &entry : elf_->functions) {
+    if (entry.first != entry.second.name)
+      continue;
+    if (entry.second.begin >= begin && entry.second.begin < end)
+      project_.undefine_function(entry.second.begin);
+  }
 
   for (int id : tree_.all_of_kind(region_kind::kFunction)) {
     const uint64_t at = tree_.address(id);
@@ -881,13 +1094,21 @@ void Session::apply_project() {
   for (const auto &range : project_.data_ranges())
     image_->mark_data(range.first, range.second);
 
-  // Everything someone marked out by hand goes back into the tree. Order
-  // matters only in that a mark inside another has to be added after it, and
-  // the tree works that out from the extents.
-  for (const Project::Mark &mark : project_.marks())
+  // Everything someone marked out by hand goes back. Order matters only in
+  // that a mark inside another has to be added after it, and the tree works
+  // that out from the extents.
+  for (const Project::Mark &mark : project_.marks()) {
+    // A function is more than a region: it is what the listing is cut up by,
+    // so it goes back into the function table as well as the tree.
+    if (mark.kind == region_kind::kFunction) {
+      define_function(mark.begin, mark.end, mark.name);
+      continue;
+    }
+
     tree_.set_user_defined(
         tree_.add(mark.begin, mark.end - mark.begin, mark.kind, mark.name),
         true);
+  }
 
   for (const Project::RegionSpec &region : project_.regions()) {
     // Already there if the command line named the same stretch.
@@ -900,6 +1121,47 @@ void Session::apply_project() {
     add_region(region.begin, region.end, region.spec, region.abi,
                region.stack_pointer);
   }
+}
+
+std::vector<double> Session::entropy(size_t buckets) const {
+  std::vector<double> result;
+  if (buckets == 0 || image_->empty())
+    return result;
+
+  result.reserve(buckets);
+  const uint64_t base = image_->base();
+  const uint64_t span = image_->limit() - base;
+
+  for (size_t i = 0; i < buckets; ++i) {
+    const uint64_t from = base + span * i / buckets;
+    const uint64_t to = base + span * (i + 1) / buckets;
+
+    unsigned counts[256] = {};
+    uint64_t total = 0;
+    for (uint64_t at = from; at < to; ++at) {
+      const uint8_t *byte = image_->at(at);
+      if (byte == nullptr)
+        break;
+      ++counts[*byte];
+      ++total;
+    }
+
+    if (total == 0) {
+      result.push_back(0.0);
+      continue;
+    }
+
+    double bits = 0.0;
+    for (unsigned count : counts) {
+      if (count == 0)
+        continue;
+      const double p = static_cast<double>(count) / static_cast<double>(total);
+      bits -= p * std::log2(p);
+    }
+    result.push_back(bits);
+  }
+
+  return result;
 }
 
 void Session::open_project(std::string path) {

@@ -75,8 +75,18 @@ function M.open(ui, options)
     if item.addr then ui:navigate(item.addr) end
   end)
 
-  for _, row in ipairs(rows) do list:add(row.markup, row) end
+  -- A string constant referenced from four hundred places is a real thing, and
+  -- four hundred rows is not an answer. The count in the heading is.
+  local limit = ddd.ui.limits.rows
+  for index, row in ipairs(rows) do
+    if index > limit then break end
+    list:add(row.markup, row)
+  end
+
   if #rows == 0 then list:add("<i>nothing</i>", {}) end
+  if #rows > limit then
+    list:add(("<i>... %d more</i>"):format(#rows - limit), {})
+  end
   list:select(1)
 
   local keys = Gtk.EventControllerKey()

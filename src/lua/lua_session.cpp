@@ -284,8 +284,10 @@ int session_listing(lua_State *L) {
   set_number(L, "end", static_cast<lua_Integer>(listing.end));
   set_string(L, "text", listing.text);
 
-  self->build_xrefs();
-
+  // Deliberately not building the reference index here. It is a sweep of the
+  // whole image, and an interface asking for a listing wants a listing now --
+  // whatever references are known go in, and when the index arrives the
+  // listing is asked for again.
   lua_createtable(L, static_cast<int>(listing.blocks.size()), 0);
   for (size_t i = 0; i < listing.blocks.size(); ++i) {
     push_block(L, *self, listing.blocks[i]);
@@ -319,6 +321,23 @@ int session_define_function(lua_State *L) {
   self->define_function(check_address(L, 1), check_address(L, 2),
                         check_string(L, 3));
   return 0;
+}
+
+// One slice of the work that would otherwise be a sweep of the whole image.
+// Call it until `finished`; between calls the caller is answerable.
+int session_analyse_step(lua_State *L) {
+  Session *self = session(L);
+  const int budget =
+      lua_isnoneornil(L, 1) ? 20000 : static_cast<int>(luaL_checkinteger(L, 1));
+
+  const Session::AnalysisStep step = self->analyse_step(budget);
+
+  lua_createtable(L, 0, 4);
+  set_string(L, "stage", step.stage);
+  set_number(L, "done", static_cast<lua_Integer>(step.done));
+  set_number(L, "total", static_cast<lua_Integer>(step.total));
+  set_boolean(L, "finished", step.finished);
+  return 1;
 }
 
 int session_build_xrefs(lua_State *L) {
@@ -379,6 +398,23 @@ int session_data(lua_State *L) {
   }
   lua_setfield(L, -2, "items");
 
+  return 1;
+}
+
+// One figure per equal slice of the image, in bits per byte. What a map of the
+// whole file is drawn from.
+int session_entropy(lua_State *L) {
+  Session *self = session(L);
+  const size_t buckets =
+      lua_isnoneornil(L, 1) ? 512 : static_cast<size_t>(luaL_checkinteger(L, 1));
+
+  const std::vector<double> values = self->entropy(buckets);
+
+  lua_createtable(L, static_cast<int>(values.size()), 0);
+  for (size_t i = 0; i < values.size(); ++i) {
+    lua_pushnumber(L, values[i]);
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+  }
   return 1;
 }
 
@@ -634,10 +670,12 @@ const luaL_Reg kSessionFunctions[] = {
     {"listing", session_listing},
     {"xrefs", session_xrefs},
     {"build_xrefs", session_build_xrefs},
+    {"analyse_step", session_analyse_step},
     {"discover_functions", session_discover_functions},
     {"define_function", session_define_function},
     {"data", session_data},
     {"hex", session_hex},
+    {"entropy", session_entropy},
     {"rename_function", session_rename_function},
     {"rename_variable", session_rename_variable},
     {"set_comment", session_set_comment},

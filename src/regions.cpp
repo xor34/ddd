@@ -126,6 +126,24 @@ void RegionTree::set_user_defined(int id, bool user_defined) {
     nodes_[id].user_defined = user_defined;
 }
 
+void RegionTree::resize(int id, uint64_t size) {
+  if (!valid(id) || size == 0)
+    return;
+
+  nodes_[id].size = size;
+  const uint64_t end = address(id) + size;
+
+  std::vector<int> orphaned;
+  for (int child : nodes_[id].children)
+    if (valid(child) && this->end(child) > end)
+      orphaned.push_back(child);
+
+  for (int child : orphaned) {
+    detach(child);
+    dead_[child] = true;
+  }
+}
+
 void RegionTree::detach(int id) {
   const int parent = nodes_[id].parent;
   if (parent < 0)

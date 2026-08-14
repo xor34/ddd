@@ -170,6 +170,27 @@ public:
   void discover_functions();
   bool discovered() const { return discovered_; }
 
+  // ---- doing it a slice at a time ---------------------------------------
+  //
+  // Both of the above are sweeps of the whole image, and an interface that
+  // calls one has no window until it returns. Threading them is not the answer
+  // it looks like: a Sleigh translator holds decode state and is shared per
+  // instruction set, and the passes are Lua, which is one interpreter -- so
+  // two threads doing this would spend their time waiting for each other.
+  //
+  // Yielding is the answer. Each call does a bounded amount of work and says
+  // where it got to; a caller runs it until `finished`, on an idle handler, and
+  // stays answerable in between.
+  struct AnalysisStep {
+    std::string stage; // "references", "functions", "done"
+    uint64_t done = 0;
+    uint64_t total = 0; // 0 when the total is not known yet
+    bool finished = false;
+  };
+
+  // `budget` is the instructions to decode in one go. Smaller is smoother.
+  AnalysisStep analyse_step(int budget = 20000);
+
   // Adds one, overriding whatever discovery decided. What a plugin that knows
   // better -- a signature, a prologue scan, a person -- calls.
   void define_function(uint64_t begin, uint64_t end, std::string name);
@@ -268,6 +289,14 @@ public:
   DataView data(uint64_t address, uint64_t count);
   HexView hex(uint64_t address, uint64_t length);
 
+  // Shannon entropy in bits per byte, one figure per equal slice of the image.
+  //
+  // What it is for is seeing the shape of a file at a glance: instructions sit
+  // in the middle of the range, padding and tables at the bottom, compressed
+  // or encrypted blobs at the top. A map of the whole image drawn from this
+  // says where the interesting parts are before anything has been analysed.
+  std::vector<double> entropy(size_t buckets) const;
+
   // ---- what the user decided --------------------------------------------
 
   Project &project() { return project_; }
@@ -301,12 +330,34 @@ private:
 
   RegionTree tree_;
 
+  // Where the slice-at-a-time analysis has got to.
+  size_t index_region_ = 0;   // which code region is being indexed
+  uint64_t index_at_ = 0;     // and where in it
+  bool indexed_ = false;
+  std::vector<uint64_t> starts_; // function starts, once they are known
+  size_t start_at_ = 0;
+
   // A region to sweep from `address`, stopping at the end of whatever
   // instruction-set region it is in.
   bool sweep_region(uint64_t address, Region &out) const;
 
   // Drops everything that said a stretch was not code.
   void clear_data_over(uint64_t begin, uint64_t end);
+
+  // Splitting a data region around code defined inside it, rather than losing
+  // the whole region because one part of it was corrected.
+  std::vector<std::pair<uint64_t, uint64_t>> data_over(uint64_t address) const;
+  void mark_data_region(uint64_t begin, uint64_t end);
+  void restore_data_around(
+      const std::vector<std::pair<uint64_t, uint64_t>> &ranges, uint64_t begin,
+      uint64_t end);
+
+  // The two halves of discovery, so it can be done a piece at a time.
+  void collect_starts();
+  bool bound_start(size_t index);
+
+  // Where the next function starts, which is where this one has to stop.
+  uint64_t next_function_after(uint64_t address, uint64_t limit) const;
 };
 
 } // namespace ddd

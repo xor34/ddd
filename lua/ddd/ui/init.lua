@@ -18,6 +18,20 @@ M.theme = theme
 M.views = {}
 M.commands = {}
 
+-- How much of a thing to put on screen before saying how much more there is.
+--
+-- Every one of these has a real case behind it: a string constant referenced
+-- from four hundred places, a jump table with a thousand entries, a register
+-- used on every line of a large function. Showing all of it is not thorough,
+-- it is unreadable -- and the count that replaces the rest is the part that
+-- was actually informative.
+M.limits = {
+  inline_xrefs = 6,  -- at a block label, in the listing
+  rows = 300,        -- in a list: references, occurrences, data items
+  functions = 3000,  -- in the function list, which is filtered instead
+  gap_bytes = 512,   -- of a hexdump between functions
+}
+
 local function replace_named(list, spec)
   for i, existing in ipairs(list) do
     if existing.name == spec.name then
@@ -192,6 +206,18 @@ function Context:listing(addr, options)
   })
 
   self.cache[key] = { generation = self.generation, listing = listing }
+  self.cached[#self.cached + 1] = key
+
+  -- Analysing a whole binary up front means a listing per function, and a
+  -- listing is a lot of tokens. Keep the recent ones and let the rest go; a
+  -- function that is wanted again is one analysis away.
+  if #self.cached > 400 then
+    local kept = {}
+    for i = 201, #self.cached do kept[#kept + 1] = self.cached[i] end
+    for i = 1, 200 do self.cache[self.cached[i]] = nil end
+    self.cached = kept
+  end
+
   return listing
 end
 
@@ -200,6 +226,7 @@ end
 function Context:invalidate()
   self.generation = self.generation + 1
   self.cache = {}
+  self.cached = {}
   self:emit("invalidate")
   self:emit("refresh")
 end
@@ -281,16 +308,15 @@ function M.context(options)
     status_text = "",
 
     cache = {},
+    cached = {},   -- keys in the order they were added, for eviction
     generation = 0,
   }, Context)
 
-  -- Before anything asks what functions there are. A file whose symbol table
-  -- was stripped has none until this has run, and every analysis downstream is
-  -- per-function -- so without it the interface would be showing one enormous
-  -- "function" whose listing is unreadable for reasons that look like bugs in
-  -- the passes.
-  session.discover_functions()
-
+  -- Deliberately *not* analysing anything here. Indexing the references and
+  -- working out where the functions are is a sweep of the whole image, and
+  -- doing it before the window exists means staring at nothing while it
+  -- happens. An interface starts empty, puts itself on screen, and fills in --
+  -- see plugins/studio/analysis.lua.
   local info = session.info()
   context.info = info
   if info.entry and info.entry ~= 0 then

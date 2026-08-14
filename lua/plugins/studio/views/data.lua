@@ -36,7 +36,8 @@ function M.build(ui)
     list:clear()
     if not addr then return end
 
-    local view = ui.session.data(addr, 128)
+    local limit = ddd.ui.limits.rows
+    local view = ui.session.data(addr, math.min(limit, 128))
     local theme = ui.theme.token
 
     for _, item in ipairs(view.items) do

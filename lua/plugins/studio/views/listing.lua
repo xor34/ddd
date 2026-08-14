@@ -29,7 +29,12 @@ local kLineBudget = 2500
 -- How much of a stretch of undefined bytes to dump before eliding the rest.
 -- Enough to recognise what it is; not so much that scrolling past a megabyte
 -- of data is the only way out of it.
-local kGapBytes = 512
+local kGapBytes = ddd.ui.limits.gap_bytes
+
+-- How far from an address a line may be and still count as showing it. One
+-- instruction, or one row of a hexdump; further than that and the view has to
+-- be rendered again around where it is going.
+local kNearEnough = 16
 
 local View = {}
 View.__index = View
@@ -111,7 +116,14 @@ function M.build(ui, options)
       end
 
       self:select(token, line)
-      if presses >= 2 then self:follow(token, line) end
+
+      -- A reference line is nothing but a place to go: there is no variable on
+      -- it to select and nothing else it could mean, so one click follows it.
+      -- Everything else takes two, because one click there means "tell me
+      -- about this".
+      if presses >= 2 or (line and line.target) then
+        self:follow(token, line)
+      end
       return false
     end)
   end
@@ -119,9 +131,39 @@ function M.build(ui, options)
 
   self.widget = gtk.scrolled(self.view, { class = "ddd-listing" })
 
+  -- Say which stretch of the file is on screen, so the map can show it the way
+  -- a scrollbar does. Taken from the scroll position against the addresses
+  -- painted rather than from text geometry: line heights differ between code
+  -- and a hexdump, and this is an indicator rather than a measurement.
+  local adjustment = self.widget:get_vadjustment()
+  if adjustment then
+    adjustment.on_value_changed = function() self:publish_viewport() end
+  end
+
+  -- A render that raises must not leave the line map describing one listing
+  -- while the buffer shows another: everything downstream -- what a click
+  -- selects, what a comment attaches to, where the cursor is said to be --
+  -- reads that map. So a failure is reported and the previous state restored.
+  local function safely(addr)
+    local keep = {
+      lines = self.lines, by_id = self.by_id, painted = self.painted,
+      line_of_addr = self.line_of_addr, span = self.span,
+    }
+
+    local ok, problem = pcall(self.show, self, addr)
+    if ok then return end
+
+    self.lines, self.by_id = keep.lines, keep.by_id
+    self.painted, self.line_of_addr = keep.painted, keep.line_of_addr
+    self.span = keep.span
+
+    ui:status("listing: " .. tostring(problem))
+    ui:log("listing: " .. tostring(problem))
+  end
+
   ui:on("navigate", function(_, addr)
     ui.focus = addr
-    self:show(addr)
+    safely(addr)
   end)
 
   -- Both re-render, and both come back to where the user was looking rather
@@ -129,11 +171,11 @@ function M.build(ui, options)
   ui:on("invalidate", function()
     self.functions = nil
     self.span = nil
-    self:show(ui.focus or ui.addr)
+    safely(ui.focus or ui.addr)
   end)
   ui:on("refresh", function()
     self.span = nil
-    self:show(ui.focus or ui.addr)
+    safely(ui.focus or ui.addr)
   end)
 
   return self
@@ -231,15 +273,26 @@ function View:show(addr)
 
   -- Already on screen: scroll rather than re-render, which is what makes
   -- following a call inside the window instant.
-  if self.span and self.span.from == from and self.span.to == to
-     and self:line_for(addr) then
-    self:reveal(addr)
-    self:highlight(self.selected_id)
-    return
+  --
+  -- "On screen" has to mean a line that is actually about this address, not
+  -- merely the nearest one before it. A data region is dumped around wherever
+  -- you were going, so an address deep inside one has no line until it is
+  -- rendered again -- and taking this shortcut on the strength of a line ten
+  -- kilobytes earlier is how going somewhere lands somewhere else.
+  if self.span and self.span.from == from and self.span.to == to then
+    local line = self:line_for(addr)
+    local landed = line and self.lines[line] and self.lines[line].addr
+
+    if landed and addr - landed <= kNearEnough then
+      self:reveal(addr)
+      self:highlight(self.selected_id)
+      return
+    end
   end
 
-  self:render(from, to)
+  self:render(from, to, addr)
   self:reveal(addr)
+  self:publish_viewport()
 end
 
 -- What to draw, in address order: the functions in the window, and the
@@ -249,10 +302,24 @@ end
 -- nothing -- they are data, or a jump table, or something that was called a
 -- function until you said it was not -- and a view that draws only functions
 -- makes undefining one look like it did nothing at all.
-function View:layout(from, to)
+function View:layout(from, to, focus)
   local functions = self:function_list()
   local items = {}
   local at = nil
+
+  -- What comes before the first function in the window, when that is where we
+  -- are going. Without it, going to an address below the first function of the
+  -- window finds no line at all and the view stays where it was.
+  local first = functions[from]
+  if focus and first and focus < first.addr then
+    local previous = functions[from - 1]
+    local begins = previous and (previous.addr + previous.size)
+      or self.ui.info.base
+    if focus >= begins then
+      items[#items + 1] = { kind = "gap", from = begins, to = first.addr }
+      at = first.addr
+    end
+  end
 
   for index = from, to do
     local func = functions[index]
@@ -275,10 +342,18 @@ function View:layout(from, to)
   return items
 end
 
-function View:render(from, to)
+function View:render(from, to, focus)
   local ui = self.ui
   local functions = self:function_list()
 
+  -- Built into fresh tables and committed at the end.
+  --
+  -- The buffer is only replaced once everything has been painted, so if any of
+  -- this raises -- and it is a lot of code over data produced by analysis --
+  -- the view keeps the listing it had, whole, instead of a line map describing
+  -- text that is not on screen. That desync is invisible and vicious: the
+  -- listing looks stale while the address under the pointer, what a comment
+  -- attaches to, and what a click selects all come from somewhere else.
   self.lines = {}
   self.by_id = {}
   self.line_of_addr = {}
@@ -288,7 +363,7 @@ function View:render(from, to)
   local paint = painter()
   local info = ui.info
 
-  local items = self:layout(from, to)
+  local items = self:layout(from, to, focus)
   if #items == 0 then
     self.buffer:set_text("nothing here", -1)
     return
@@ -296,14 +371,27 @@ function View:render(from, to)
 
   for index, item in ipairs(items) do
     if item.kind == "gap" then
-      self:paint_gap(paint, item.from, item.to)
+      self:paint_gap(paint, item.from, item.to, focus)
     else
       local listing = ui:listing(item.func.addr, { printer = self.printer })
       if listing and listing.ok then
+        -- Anything drawn has been through the pipeline, which is what the map
+        -- colours blue -- so scrolling counts as analysing it too.
+        ui.analysed = ui.analysed or {}
+        ui.analysed[item.func.addr] = true
+
         self:paint_function(paint, listing, info)
       else
-        paint:put(("%s  %s"):format(item.func.name,
-                                    listing and listing.error or "?"), "comment")
+        -- Still a line at that address, even though there is nothing to show:
+        -- navigating here has to land somewhere, or following a reference to a
+        -- stub that does not disassemble silently does nothing at all.
+        self.lines[paint.line] = { addr = item.func.addr }
+        self:mark_line(item.func.addr, paint.line)
+
+        paint:put(item.func.name, "heading")
+        paint:put(("  0x%x  %s"):format(item.func.addr,
+                                        listing and listing.error or "?"),
+                  "comment")
         paint:newline()
         paint:newline()
       end
@@ -342,7 +430,7 @@ end
 -- decided anything about yet. The Data view decodes; this one just says what
 -- is there, so that undefining a function visibly turns it back into what it
 -- was made of.
-function View:paint_gap(paint, from, to)
+function View:paint_gap(paint, from, to, focus)
   local ui = self.ui
   local size = to - from
 
@@ -355,23 +443,48 @@ function View:paint_gap(paint, from, to)
   end
 
   self.lines[paint.line] = { addr = from }
+  self:mark_line(from, paint.line)
   paint:put(label, "heading")
   paint:put(("  0x%x-0x%x  %d byte%s"):format(from, to, size,
                                               size == 1 and "" or "s"),
             "address")
   paint:newline()
 
-  local shown = math.min(size, kGapBytes)
-  local view = ui.session.hex(from, shown)
+  -- Which part of it to dump.
+  --
+  -- Not always the beginning. A data region can be a hundred kilobytes, and
+  -- going to an address in the middle of one has to *land* there -- dumping
+  -- the first five hundred bytes and stopping means the address has no line,
+  -- and navigation quietly leaves you wherever the nearest line happens to be,
+  -- which can be the top of the region or the top of the window.
+  local start = from
+  if focus and focus >= from and focus < to and size > kGapBytes then
+    start = focus - kGapBytes // 2
+    if start + kGapBytes > to then start = to - kGapBytes end
+    if start < from then start = from end
+    start = start - (start % 16)
+    if start < from then start = from end
+  end
+
+  local shown = math.min(to - start, kGapBytes)
+  local view = ui.session.hex(start, shown)
   local bytes = view.bytes or ""
+
+  if start > from then
+    self.lines[paint.line] = { addr = from }
+    paint:put(("  ... %d byte%s before"):format(start - from,
+                                                start - from == 1 and "" or "s"),
+              "comment")
+    paint:newline()
+  end
 
   for offset = 0, #bytes - 1, 16 do
     local row = bytes:sub(offset + 1, offset + 16)
 
-    self.lines[paint.line] = { addr = from + offset }
-    self:mark_line(from + offset, paint.line)
+    self.lines[paint.line] = { addr = start + offset }
+    self:mark_line(start + offset, paint.line)
 
-    paint:put(("  %08x  "):format(from + offset), "address")
+    paint:put(("  %08x  "):format(start + offset), "address")
 
     local hex, text = {}, {}
     for i = 1, 16 do
@@ -389,9 +502,10 @@ function View:paint_gap(paint, from, to)
     paint:newline()
   end
 
-  if size > shown then
-    paint:put(("  ... %d more byte%s"):format(size - shown,
-                                              size - shown == 1 and "" or "s"),
+  local after = to - (start + shown)
+  if after > 0 then
+    self.lines[paint.line] = { addr = start + shown }
+    paint:put(("  ... %d more byte%s"):format(after, after == 1 and "" or "s"),
               "comment")
     paint:newline()
   end
@@ -402,15 +516,28 @@ end
 function View:paint_function(paint, listing, info)
   -- A heading, because in a linear listing the thing you most need to know is
   -- which function you have scrolled into.
+  --
+  -- It owns the function's start address, which is not always where its first
+  -- block starts: an instruction can lower to no p-code at all, so an x86-64
+  -- PLT stub's first block begins four bytes in. Without this, following a
+  -- call to one finds no line for the address it was told to go to.
+  self.lines[paint.line] = { addr = listing.addr }
+  self:mark_line(listing.addr, paint.line)
+
   paint:put(("%s"):format(listing.name), "heading")
   paint:put(("  0x%x-0x%x"):format(listing.addr, listing["end"]), "address")
   paint:newline()
 
   -- Block ids mean nothing to a reader; the label the block will be printed
-  -- under does.
-  local labels = {}
+  -- under does. Kept beside the address it stands for, rather than the label
+  -- being parsed back out of its own text later -- a branch whose target the
+  -- sweep could not resolve arrives as `goto -1`, matches no label, and
+  -- reading an address out of that is an error that takes the whole render
+  -- with it.
+  local labels, targets = {}, {}
   for _, block in ipairs(listing.blocks) do
     labels[block.id] = ("loc_%x"):format(block.addr)
+    targets[block.id] = block.addr
   end
 
   for _, block in ipairs(listing.blocks) do
@@ -428,9 +555,19 @@ function View:paint_function(paint, listing, info)
     -- because that is where you are looking. Inside a function only the ones
     -- that come from outside it are news; the rest is the control flow the
     -- labels already show.
+    --
+    -- And only a few: a string constant can be referenced from hundreds of
+    -- places, and a screenful of them where the code should be is worse than a
+    -- count and an `x` away.
+    local limit = ddd.ui.limits.inline_xrefs
+    local shown, wanted = 0, 0
+
     for _, ref in ipairs(block.xrefs) do
       local interesting = block.entry or ref.kind ~= "data"
+      if interesting then wanted = wanted + 1 end
+      if interesting and shown >= limit then interesting = false end
       if interesting then
+        shown = shown + 1
         paint:put("  ; ", "xref")
         paint:put(("%s from "):format(ref.kind), "xref")
         local from, to = paint:put(("0x%x"):format(ref.from), "xref")
@@ -444,6 +581,13 @@ function View:paint_function(paint, listing, info)
         }
         paint:newline()
       end
+    end
+
+    if wanted > shown then
+      self.lines[paint.line] = { addr = block.addr }
+      paint:put(("  ; ... %d more reference(s); x to list them")
+        :format(wanted - shown), "xref")
+      paint:newline()
     end
 
     for _, comment in ipairs(block.comments) do
@@ -473,8 +617,9 @@ function View:paint_function(paint, listing, info)
         local text = token.s
         local target = nil
         if token.k == "block" then
-          text = labels[tonumber(token.s)] or ("block " .. token.s)
-          target = tonumber(text:match("loc_(%x+)"), 16)
+          local id = tonumber(token.s)
+          text = (id and labels[id]) or ("block " .. token.s)
+          target = id and targets[id] or nil
         end
 
         local column = paint.column
@@ -513,6 +658,24 @@ function View:paint_function(paint, listing, info)
   end
 
   paint:newline()
+end
+
+function View:publish_viewport()
+  local ui = self.ui
+  local first, last = self.painted[1], self.painted[#self.painted]
+  if not first or not last or last <= first then return end
+
+  local adjustment = self.widget:get_vadjustment()
+  if not adjustment or adjustment.upper <= 0 then return end
+
+  local span = last - first
+  local top = adjustment.value / adjustment.upper
+  local bottom = math.min(1, (adjustment.value + adjustment.page_size)
+                             / adjustment.upper)
+
+  ui.viewport_from = math.floor(first + span * top)
+  ui.viewport_to = math.floor(first + span * bottom)
+  ui:emit("viewport", ui.viewport_from, ui.viewport_to)
 end
 
 -- Every address that begins a line, so that an address which merely *falls*
@@ -559,14 +722,26 @@ function View:reveal(addr)
   local line = self:line_for(addr)
   if not line then return end
 
-  -- After the buffer has been laid out, or the scroll lands nowhere. The
-  -- iterator is fetched inside the callback rather than captured: by then the
-  -- buffer is the one on screen.
-  gtk.GLib.idle_add(gtk.GLib.PRIORITY_DEFAULT_IDLE, function()
-    local iter = self.buffer:get_iter_at_line(line)
-    if iter then self.view:scroll_to_iter(iter, 0.0, true, 0.0, 0.35) end
-    return false
-  end)
+  local iter = self.buffer:get_iter_at_line(line)
+  if not iter then return end
+
+  -- Through a mark, not an iterator.
+  --
+  -- scroll_to_iter cannot scroll to a line the view has not laid out yet, and
+  -- says so by quietly doing nothing -- which is precisely the case here,
+  -- because the buffer was refilled a moment ago. The result is a listing that
+  -- has moved in every respect except the one you can see: clicking lands on
+  -- the new function's tokens while the old pixels are still on screen.
+  --
+  -- A mark is remembered across validation, so the view performs the scroll
+  -- when it is able to.
+  if not self.focus_mark or self.focus_mark:get_deleted() then
+    self.focus_mark = self.buffer:create_mark("ddd-focus", iter, false)
+  else
+    self.buffer:move_mark(self.focus_mark, iter)
+  end
+
+  self.view:scroll_to_mark(self.focus_mark, 0.0, true, 0.0, 0.35)
 end
 
 -- ---- what is under the pointer -------------------------------------------
@@ -691,6 +866,43 @@ function View:probe(wanted)
     first_failure and ("  first miss: " .. first_failure) or "")
 end
 
+-- Navigating somewhere has to put the focus mark on that address's line, in
+-- the buffer that is now on screen. Whether the *view* then scrolls to the
+-- mark is GTK's business, but everything up to that point is this file's, and
+-- when it was wrong the listing appeared to ignore clicks entirely.
+function View:probe_navigation(addresses)
+  local checked, exact, nowhere = 0, 0, 0
+  local drift, worst, worst_at = 0, 0, nil
+
+  for _, addr in ipairs(addresses) do
+    checked = checked + 1
+    self:show(addr)
+
+    local line = self:line_for(addr)
+    local landed = line and self.lines[line] and self.lines[line].addr
+
+    if not landed then
+      nowhere = nowhere + 1
+    elseif landed == addr then
+      exact = exact + 1
+    else
+      -- Landing early is the fallback working: the line that starts at or
+      -- before the address is the line the address is *on*. Landing a long way
+      -- early means it is not on a line at all and the fallback walked back
+      -- until it found one.
+      local delta = addr - landed
+      drift = drift + 1
+      if delta > worst then
+        worst, worst_at = delta, addr
+      end
+    end
+  end
+
+  return ("navigation: %d exact, %d early, %d nowhere, of %d%s"):format(
+    exact, drift, nowhere, checked,
+    worst_at and ("  worst: 0x%x by %d bytes"):format(worst_at, worst) or "")
+end
+
 -- ---- registration --------------------------------------------------------
 
 ddd.workflow "studio" {
@@ -702,7 +914,15 @@ ddd.workflow "studio" {
       build = function(ui)
         local view = M.build(ui, { printer = "hil" })
         ui.listing_view = view
-        view:show(ui.addr)
+
+        -- Not now: rendering is a pipeline run per function on screen, and
+        -- doing it while the window is being constructed is time spent before
+        -- anything is visible. One idle callback later the window is up.
+        gtk.GLib.idle_add(gtk.GLib.PRIORITY_DEFAULT_IDLE, function()
+          view:show(ui.addr)
+          return false
+        end)
+
         return view.widget
       end,
     }

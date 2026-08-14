@@ -91,6 +91,11 @@ public:
   void set_name(int id, std::string name);
   void set_user_defined(int id, bool user_defined);
 
+  // Makes a region smaller. Children that no longer fit inside it go with it:
+  // a function that stops earlier does not keep the blocks that were past the
+  // new end, because those belong to whatever starts there now.
+  void resize(int id, uint64_t size);
+
   // Removes a region. Its children move up to its parent, because they are
   // still there -- undefining a function does not undefine its blocks, it
   // stops calling that stretch a function.

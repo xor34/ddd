@@ -105,6 +105,11 @@ std::string functions_json(Session &session, const std::string &pattern) {
 }
 
 std::string data_json(Session &session, uint64_t address, uint64_t count) {
+  // One request, one complete answer. A drawn interface asks for what is known
+  // now and re-asks when the index lands; a protocol has nowhere to put "not
+  // yet", so it waits for the sweep.
+  session.build_xrefs();
+
   DataView view = session.data(address, count);
 
   std::vector<std::string> items;

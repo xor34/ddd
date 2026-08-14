@@ -15,6 +15,7 @@
 #include "../hil.h"
 #include "../pass.h"
 
+#include <algorithm>
 #include <cctype>
 #include <map>
 #include <ostream>
@@ -164,13 +165,26 @@ private:
       ++named;
     }
 
-    // A few to a line: a function with thirty of these produces a comment
-    // wider than any window, and the point of the note is to be glanced at.
+    // A few to a line, and only a few lines.
+    //
+    // The point of the note is to be glanced at. A large function can leave
+    // thousands of these -- every sub-register of every XMM register counts as
+    // its own storage -- and printing all of them puts several hundred lines of
+    // bookkeeping above the first instruction, which is worse than not saying
+    // where anything lives. The count is what remains informative past that.
     constexpr size_t kPerLine = 8;
-    for (size_t i = 0; i < notes.size(); i += kPerLine) {
+    constexpr size_t kMaxLines = 3;
+    constexpr size_t kMaxNotes = kPerLine * kMaxLines;
+
+    const size_t shown = std::min(notes.size(), kMaxNotes);
+    for (size_t i = 0; i < shown; i += kPerLine) {
       std::string line = i == 0 ? "storage: " : "         ";
-      for (size_t j = i; j < notes.size() && j < i + kPerLine; ++j)
+      for (size_t j = i; j < shown && j < i + kPerLine; ++j)
         line += (j > i ? "; " : "") + notes[j];
+
+      if (i + kPerLine >= shown && notes.size() > shown)
+        line += "; (+" + std::to_string(notes.size() - shown) + " more)";
+
       ctx.annotations->comment_block(entry_, line);
     }
 

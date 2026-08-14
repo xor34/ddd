@@ -18,6 +18,7 @@ require "plugins.studio.views.functions"
 require "plugins.studio.views.listing"
 require "plugins.studio.views.ssa"
 require "plugins.studio.views.data"
+require "plugins.studio.views.map"
 
 -- ---- keys ----------------------------------------------------------------
 
@@ -140,7 +141,12 @@ local function side(ui, place, width)
 
   for _, view in ipairs(views) do
     local widget = view.build(ui)
-    if widget then box:append(gtk.panel(view.title or view.name, widget)) end
+    if widget then
+      -- A view can ask for no chrome. The map is a strip down the edge of the
+      -- window rather than a panel with a heading; giving it one would make it
+      -- look like something to read instead of something to steer with.
+      box:append(view.bare and widget or gtk.panel(view.title or view.name, widget))
+    end
   end
 
   return box
@@ -189,24 +195,31 @@ local function build(ui, app)
   window:set_titlebar(header)
 
   -- Left, main, right, each side only if something registered a view for it.
+  -- The right strip is narrow on purpose: it is a map of the file rather than
+  -- a panel, and the listing is what the window is for.
+  local kRight, kLeft = 22, 300
+
   local body = stack
-  local right = side(ui, "right", 340)
+
+  -- A box rather than a paned: the strip is 20 pixels of map, there is nothing
+  -- to drag it to, and a paned given a position before it has been allocated
+  -- clamps it -- which is how the strip ended up with no width at all.
+  local right = side(ui, "right", kRight)
   if right then
-    local split = Gtk.Paned { orientation = Gtk.Orientation.HORIZONTAL }
-    split:set_start_child(body)
-    split:set_end_child(right)
-    split.resize_end_child = false
-    split.position = 1140
-    body = split
+    local row = gtk.box(Gtk.Orientation.HORIZONTAL)
+    body.hexpand = true
+    row:append(body)
+    row:append(right)
+    body = row
   end
 
-  local left = side(ui, "left", 300)
+  local left = side(ui, "left", kLeft)
   if left then
     local split = Gtk.Paned { orientation = Gtk.Orientation.HORIZONTAL }
     split:set_start_child(left)
     split:set_end_child(body)
     split.resize_start_child = false
-    split.position = 300
+    split.position = kLeft
     body = split
   end
 
@@ -279,6 +292,48 @@ end
 
 local M = {}
 
+-- Doing things to a window that is actually running.
+--
+-- The smoke modes build everything and stop, which catches a great deal but
+-- not anything about the main loop -- and "I clicked and nothing happened" is
+-- always about the main loop. This performs a sequence against a live window,
+-- one step at a time, so it can be watched.
+--
+--   DDD_DRIVE="goto:0x400490;run:define-function;shot"
+--
+-- `shot` only marks the moment; the screenshot is taken from outside.
+function M.drive(ui, script)
+  if not script or script == "" then return end
+
+  local steps = {}
+  for step in script:gmatch("[^;]+") do steps[#steps + 1] = step end
+
+  local at = 1
+  gtk.GLib.timeout_add(gtk.GLib.PRIORITY_DEFAULT, 700, function()
+    local step = steps[at]
+    if not step then return false end
+    at = at + 1
+
+    local verb, argument = step:match("^([%a-]+):?(.*)$")
+
+    if verb == "goto" then
+      local addr = tonumber(argument)
+      ui:navigate(addr)
+      ui.focus = addr
+      ui.selection = { addr = addr }
+    elseif verb == "run" then
+      ui:run(argument)
+    elseif verb == "quit" then
+      ui:quit()
+      return false
+    end
+
+    io.write(("drive: %-28s %s\n"):format(step, ui.status_text or ""))
+    io.flush()
+    return true
+  end)
+end
+
 function M.open(ui)
   gtk.style(ui.theme.css())
 
@@ -301,6 +356,8 @@ function M.open(ui)
     -- can go wrong, and none of it needs a window on screen -- so there is a
     -- way to do exactly that and stop, which is what the test suite runs.
     if os.getenv("DDD_SMOKE") then
+      -- No main loop here, so the background stages never fire; the map's
+      -- snapshot does the same work synchronously for the tests that need it.
       ui:navigate(ui.addr or info.entry, { replace = true })
       io.write("studio: built\n")
 
@@ -318,6 +375,54 @@ function M.open(ui)
 
       if listing and mode == "click" then
         io.write(listing:probe(), "\n")
+
+        -- Jumping between functions, which is what following a reference does.
+        local addresses = {}
+        for _, func in ipairs(ui.session.functions()) do
+          addresses[#addresses + 1] = func.addr
+        end
+        io.write(listing:probe_navigation(addresses), "\n")
+
+        -- And going to an address typed in by hand, which lands wherever it
+        -- lands: inside an instruction, in the middle of a data region, in a
+        -- stretch nothing has been decided about.
+        local info = ui.info
+        local dense = {}
+        for addr = info.base, info.limit - 1, 64 do
+          dense[#dense + 1] = addr
+        end
+        io.write("dense ", listing:probe_navigation(dense), "\n")
+      end
+
+      -- Rendering every function there is. The listing is a lot of code over
+      -- data produced by analysis, and one function with a shape nothing else
+      -- has -- an unresolved branch, a block nothing reaches -- is enough to
+      -- make it throw, which shows up as a listing that has quietly stopped
+      -- agreeing with the rest of the window.
+      if listing and mode == "render" then
+        local failed, first = 0, nil
+
+        for _, func in ipairs(ui.session.functions()) do
+          local ok, problem = pcall(listing.show, listing, func.addr)
+          if not ok then
+            failed = failed + 1
+            first = first or ("%s at 0x%x: %s"):format(func.name, func.addr,
+                                                       tostring(problem))
+          end
+        end
+
+        io.write(("render: %d failed of %d%s\n"):format(
+          failed, #ui.session.functions(), first and ("  " .. first) or ""))
+      end
+
+      local to = mode and mode:match("^map:(.+)$")
+      if to and ui.map_view then
+        -- Before and after, because the difference between them is the thing
+        -- the strip exists to show.
+        ui.map_view:render_to((to:gsub("%.png$", "-before.png")), 34, 420)
+        local blue, grey = ui.map_view:snapshot(to, 34, 420)
+        io.write(("map: %d bucket(s) analysed of %d with functions -> %s\n")
+          :format(blue, grey, to))
       end
 
       -- Running a command builds whatever dialog it opens, which is where the
@@ -326,6 +431,15 @@ function M.open(ui)
       -- something somewhere off screen". `DDD_SMOKE=command:undefine`.
       local wanted = mode and mode:match("^command:(.+)$")
       if wanted then
+        -- Somewhere in particular, since most of what a command does depends
+        -- on where the cursor is.
+        local at = tonumber(os.getenv("DDD_SMOKE_AT") or "")
+        if at then
+          ui:navigate(at)
+          ui.focus = at
+          ui.selection = { addr = at }
+        end
+
         ui:run(wanted)
         io.write(("command %s: %s\n"):format(wanted, ui.status_text))
 
@@ -343,14 +457,32 @@ function M.open(ui)
         end
       end
 
+      -- A view that raised while being told something is caught and logged, so
+      -- that one bad handler does not stop the rest of the window from
+      -- updating. That is right, and it is also how a view silently stops
+      -- redrawing -- so the log is part of the report.
+      for _, message in ipairs(ui.messages) do
+        io.write("log: ", message, "\n")
+      end
+
       app:quit()
       return
     end
 
+    -- On screen first, and only then the work. Presenting only queues a
+    -- frame, so everything that costs anything -- rendering the first listing,
+    -- indexing every reference, finding the functions -- goes after the main
+    -- loop has had its turn and actually drawn the window.
     window:present()
 
-    ui:navigate(ui.addr or info.entry, { replace = true })
-    ui:status("ctrl+p for commands")
+    gtk.GLib.idle_add(gtk.GLib.PRIORITY_DEFAULT_IDLE, function()
+      ui:navigate(ui.addr or info.entry, { replace = true })
+      ui:status("ctrl+p for commands")
+
+      require("plugins.studio.analysis").start(ui)
+      M.drive(ui, os.getenv("DDD_DRIVE"))
+      return false
+    end)
   end
 
   app:run(nil)
