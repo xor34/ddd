@@ -29,6 +29,11 @@ public:
   // References *to* an address, in the order they were found.
   const std::vector<Xref> &to(uint64_t address) const;
 
+  // Everything something calls, in address order. In a stripped binary this is
+  // most of what is known about where the functions are: nothing else in the
+  // file says so, but a call instruction is evidence that survives stripping.
+  std::vector<uint64_t> call_targets() const;
+
   size_t size() const { return count_; }
 
 private:

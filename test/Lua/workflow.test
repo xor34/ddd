@@ -1,0 +1,72 @@
+# The Lua layer: passes and interfaces declared in a workflow are registered
+# exactly like the ones compiled in, and nothing downstream can tell which is
+# which.
+#
+# These four passes live in lua/plugins/analyses. --list_passes has no idea
+# they are not C++, which is the whole point of the split.
+#
+# RUN: %sleigh-poc --list_passes | FileCheck %s
+
+# CHECK-DAG: idioms	recognise idiomatic instruction sequences
+# CHECK-DAG: symbols	name calls and blocks from the container's symbol table
+# CHECK-DAG: data-refs	resolve constants pointing into the image's data
+# CHECK-DAG: user-names	apply renames and comments from the project
+# CHECK-DAG: rename	name values after their definitions
+# CHECK-DAG: calling-conv	annotate calls with their arguments
+
+
+# Interfaces are registered the same way, in the workflow's other scope.
+#
+# RUN: %sleigh-poc --list_ui | FileCheck --check-prefix=UI %s
+
+# UI: interfaces:
+# UI: studio	a windowed interface
+
+
+# Asking for one that does not exist says so, and says what there is rather
+# than leaving you to guess.
+#
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'int main(void) { return 3; }' > %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# RUN: not %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd \
+# RUN:   --ui=nosuch 2>&1 | FileCheck --check-prefix=MISSING %s
+
+# MISSING: no interface called nosuch
+# MISSING: interfaces:
+# MISSING: studio
+
+
+# A pass written in Lua does the same work as the C++ one it replaced: the
+# symbol table names the call, and the string constant is resolved.
+#
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --function=main --follow=0 | FileCheck --check-prefix=PASSES %s
+
+# PASSES: == idioms ==
+# PASSES: == data-refs ==
+# PASSES: == symbols ==
+# PASSES: == calling-conv ==
+# PASSES: ; function: main
+
+
+# The pipeline is declared in Lua beside the passes rather than duplicated as a
+# default in the C++ flag, so with the plugins off there is no pipeline at all
+# -- which fails loudly rather than quietly producing a worse listing.
+#
+# RUN: not %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --noplugins --function=main --follow=0 2>&1 \
+# RUN:   | FileCheck --check-prefix=OFF %s
+
+# OFF: no pipeline called default
+
+
+# Naming passes explicitly still overrides it, plugins or no plugins.
+#
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --noplugins --passes=stack-vars,print-ssa --function=main --follow=0 \
+# RUN:   | FileCheck --check-prefix=EXPLICIT %s
+
+# EXPLICIT: == stack-vars ==
+# EXPLICIT: == print-ssa ==

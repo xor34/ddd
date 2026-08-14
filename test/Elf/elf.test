@@ -48,7 +48,12 @@
 # The loop body reads as the source did: one accumulate, one increment. A
 # store through a named frame slot is written as the slot, so this is an
 # assignment to a variable rather than an indirection through its address.
-# CALL: var_{{[0-9a-f_]+}} = var_{{[0-9a-f_]+}} + EAX
+#
+# The call's result is `v1` rather than `EAX`: two different values live in
+# EAX in this function, so the register name would name neither of them --
+# `EAX` and `EAX_2` in a phi read as a register merging with itself. The entry
+# comment is where the storage goes instead.
+# CALL: var_{{[0-9a-f_]+}} = var_{{[0-9a-f_]+}} + v{{[0-9]+}}
 # CALL: var_{{[0-9a-f_]+}} = var_{{[0-9a-f_]+}} + 0x1
 
 

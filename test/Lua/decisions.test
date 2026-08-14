@@ -1,0 +1,85 @@
+# Overruling the analysis.
+#
+# Everything this tool works out is a guess: a sweep decides what is code,
+# references decide where the functions are, a convention decides what a call
+# is passing. A person who has read the bytes outranks all three, and what they
+# say is kept in the project so it survives the next run.
+
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'static int helper(int a, int b) { return a * b + 7; }' > %t/p.c
+# RUN: echo 'int compute(int n) { int t = 0; for (int i = 0; i < n; i++) t += helper(i, n); return t; }' >> %t/p.c
+# RUN: echo 'int main(void) { return compute(5); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --functions \
+# RUN:   | grep -w compute | grep -oE '^  0x[0-9a-f]+' | tr -d ' \t' > %t/addr.txt
+
+
+# A prototype, in the shape Binary Ninja takes one. `@ RDI` is what makes it
+# applicable rather than decorative: it says where the parameter arrives, so
+# the incoming value can carry the name everywhere it is used.
+#
+# RUN: printf 'signature ' > %t/cmds.txt
+# RUN: tr -d '\n' < %t/addr.txt >> %t/cmds.txt
+# RUN: printf ' int compute(int limit @ RDI)\nquit\n' >> %t/cmds.txt
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --server \
+# RUN:   < %t/cmds.txt 2>/dev/null | FileCheck --check-prefix=SET %s
+
+# SET: {"ok":true}
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd \
+# RUN:   --function=compute --follow=0 2>/dev/null \
+# RUN:   | FileCheck --check-prefix=SIGNATURE %s
+
+# SIGNATURE: ; signature: int compute(int limit @ RDI)
+
+# The convention passes an int in RDI and the function reads EDI, which SSA
+# treats as different storage entirely. Same space and offset is what makes
+# them the same parameter, so the name lands on the value the code actually
+# uses.
+# SIGNATURE: = limit
+
+
+# It is written down in the same vocabulary as everything else in the file.
+# RUN: FileCheck --check-prefix=FILE --input-file=%t/p.ddd %s
+# FILE: signature 0x{{[0-9a-f]+}} int compute(int limit @ RDI)
+
+
+# "This is not a function" and "this is not code". Marking a stretch as data
+# takes the functions inside it with it -- they were disassembled out of bytes
+# that turn out not to be instructions.
+#
+# RUN: printf 'undefine ' > %t/edit.txt
+# RUN: tr -d '\n' < %t/addr.txt >> %t/edit.txt
+# RUN: printf '\nquit\n' >> %t/edit.txt
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/p.ddd --server \
+# RUN:   < %t/edit.txt 2>/dev/null | FileCheck --check-prefix=UNDEF %s
+
+# UNDEF: {"ok":true}
+
+# RUN: FileCheck --check-prefix=KEPT --input-file=%t/p.ddd %s
+# KEPT: undefine 0x{{[0-9a-f]+}}
+
+
+# A region: a stretch of the image and the instruction set to read it with.
+# What makes a flat firmware image tractable -- carve it once, and the carving
+# is part of the project.
+#
+# RUN: printf 'region 0x400000 0x400100 x86-64\nquit\n' \
+# RUN:   | %sleigh-poc --file=%t/p --specs=%specs --project=%t/r.ddd --server \
+# RUN:   2>/dev/null | FileCheck --check-prefix=REGION %s
+
+# REGION: {"ok":true}
+
+# RUN: FileCheck --check-prefix=REGIONFILE --input-file=%t/r.ddd %s
+# REGIONFILE: region 0x400000 0x400100 x86-64
+
+
+# An architecture that is not installed is an error rather than a region that
+# silently disassembles as something else.
+#
+# RUN: printf 'region 0x400000 0x400100 nosucharch\nquit\n' \
+# RUN:   | %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd --server \
+# RUN:   2>/dev/null | FileCheck --check-prefix=BADSPEC %s
+
+# BADSPEC: {"error":"no spec called nosucharch"}

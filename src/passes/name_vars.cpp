@@ -60,34 +60,35 @@ public:
     // silently gets no names at all.
     counts_.clear();
     seen_.clear();
+    candidates_.clear();
+    bases_.clear();
     return_address_ = Storage{};
+    entry_ = fn.cfg().entry;
 
     Hil hil = build_hil(fn, ctx);
     argument_registers(ctx);
 
-    int named = 0;
     // Deterministic order: blocks, then statements, target before operands, so
     // the numbering follows the listing rather than SSA value ids.
     for (const HilBlock &block : hil.blocks()) {
       for (const Statement &statement : block.statements) {
-        if (statement.target != nullptr) named += name_value(*statement.target, ctx);
-        named += walk(statement.value, ctx);
-        named += walk(statement.address, ctx);
+        if (statement.target != nullptr) collect(*statement.target, ctx);
+        walk(statement.value, ctx);
+        walk(statement.address, ctx);
       }
     }
 
+    const int named = assign(ctx);
     if (ctx.verbose) ctx.stream() << "  named " << named << " variable(s)\n";
   }
 
 private:
-  int walk(ExprRef expr, PassContext &ctx) {
-    if (expr == nullptr) return 0;
+  void walk(ExprRef expr, PassContext &ctx) {
+    if (expr == nullptr) return;
 
-    int named = 0;
     if (expr->kind == ExprKind::Variable && expr->value != nullptr)
-      named += name_value(*expr->value, ctx);
-    for (ExprRef operand : expr->operands) named += walk(operand, ctx);
-    return named;
+      collect(*expr->value, ctx);
+    for (ExprRef operand : expr->operands) walk(operand, ctx);
   }
 
   void argument_registers(const PassContext &ctx) {
@@ -103,21 +104,77 @@ private:
       return_address_ = register_storage(*ctx.translator(), ctx.abi()->return_address_register);
   }
 
-  int name_value(const SsaValue &value, PassContext &ctx) {
+  // First pass: which values need a name, and what they would be called.
+  void collect(const SsaValue &value, PassContext &ctx) {
     // An unlabelled Sleigh temporary is numbered by the printer; it is not a
     // variable of the program and a name would only dress it up. A labelled
     // one is different -- something worked out what it holds.
-    if (is_temporary(value.storage) && !ctx.annotations->has_label(value)) return 0;
-    if (!seen_.insert(value.id).second) return 0;
+    if (is_temporary(value.storage) && !ctx.annotations->has_label(value)) return;
+    if (!seen_.insert(value.id).second) return;
 
-    const std::string name = choose(value, ctx);
+    Candidate candidate;
+    candidate.value = &value;
+    candidate.name = choose(value, ctx);
+    // A name taken from the storage is only a description of where the value
+    // happens to be. Anything else -- a label, a parameter, a string it points
+    // at -- is a description of what it *is*, and stands whatever else shares
+    // its register.
+    //
+    // A live-in is the exception: the incoming value of RDI *is* RDI, there is
+    // only ever one of them, and calling it anything else would be worse.
+    candidate.from_storage = !ctx.annotations->has_label(value) &&
+                             !value.is_live_in() &&
+                             candidate.name == base_name(value, ctx);
+    candidate.storage = base_name(value, ctx);
 
-    // `&var_1c` names a stack slot's address. The same slot gets its address
-    // recomputed at every access, and those are all the one variable -- giving
-    // them separate names would invent variables the program does not have.
-    const bool is_slot_address = name.size() > 1 && name[0] == '&';
-    ctx.annotations->set_display_name(value, is_slot_address ? name : unique(name));
-    return 1;
+    ++bases_[candidate.name];
+    candidates_.push_back(std::move(candidate));
+  }
+
+  // Second pass, now that the collisions are known.
+  //
+  // A register name is honest only when exactly one value of the function ever
+  // lives in that register: then `RAX` means "the RAX of this function" at
+  // every point it appears. As soon as there are two, `RAX` and `RAX_2` are
+  // two different variables that merely take turns in one register, and a phi
+  // between them reads as though the register were merging with itself. Those
+  // get plain numbered names, and a note at the top of the function says where
+  // each one lives.
+  int assign(PassContext &ctx) {
+    int named = 0;
+    int next = 0;
+    std::vector<std::string> notes;
+
+    for (const Candidate &candidate : candidates_) {
+      std::string name = candidate.name;
+
+      if (candidate.from_storage && bases_[candidate.name] > 1) {
+        name = "v" + std::to_string(++next);
+        notes.push_back(name + " in " + candidate.storage);
+      } else {
+        // `&var_1c` names a stack slot's address. The same slot gets its
+        // address recomputed at every access, and those are all the one
+        // variable -- giving them separate names would invent variables the
+        // program does not have.
+        const bool is_slot_address = name.size() > 1 && name[0] == '&';
+        if (!is_slot_address) name = unique(name);
+      }
+
+      ctx.annotations->set_display_name(*candidate.value, name);
+      ++named;
+    }
+
+    // A few to a line: a function with thirty of these produces a comment
+    // wider than any window, and the point of the note is to be glanced at.
+    constexpr size_t kPerLine = 8;
+    for (size_t i = 0; i < notes.size(); i += kPerLine) {
+      std::string line = i == 0 ? "storage: " : "         ";
+      for (size_t j = i; j < notes.size() && j < i + kPerLine; ++j)
+        line += (j > i ? "; " : "") + notes[j];
+      ctx.annotations->comment_block(entry_, line);
+    }
+
+    return named;
   }
 
   std::string choose(const SsaValue &value, const PassContext &ctx) {
@@ -176,10 +233,20 @@ private:
     return count == 1 ? base : base + "_" + std::to_string(count);
   }
 
+  struct Candidate {
+    const SsaValue *value = nullptr;
+    std::string name;    // what it would be called
+    std::string storage; // where it lives, for the note
+    bool from_storage = false;
+  };
+
   std::map<Storage, int> arguments_;
   Storage return_address_;
   std::map<std::string, int> counts_;
   std::set<int> seen_;
+  std::vector<Candidate> candidates_;
+  std::map<std::string, int> bases_;
+  int entry_ = 0;
 };
 
 DDD_REGISTER_PASS(NameVars);

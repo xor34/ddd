@@ -45,6 +45,22 @@ void Xrefs::add(const Cfg &cfg, const std::string &function) {
   }
 }
 
+std::vector<uint64_t> Xrefs::call_targets() const {
+  std::vector<uint64_t> targets;
+
+  // incoming_ is ordered, so this comes out sorted without sorting it.
+  for (const auto &entry : incoming_) {
+    for (const Xref &xref : entry.second) {
+      if (xref.kind != "call")
+        continue;
+      targets.push_back(entry.first);
+      break;
+    }
+  }
+
+  return targets;
+}
+
 const std::vector<Xref> &Xrefs::to(uint64_t address) const {
   static const std::vector<Xref> none;
   auto it = incoming_.find(address);

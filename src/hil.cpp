@@ -545,8 +545,15 @@ private:
     // folded away must show the expression, not a name with nothing defining
     // it. Only constants fold this far, because everything else lives in a
     // predecessor block and must not be moved.
-    for (size_t i = 0; i < phi.ins.size(); ++i)
+    //
+    // Each operand is labelled with the predecessor it arrives from. Without
+    // that a phi is a list of names and no information: which branch produced
+    // which value is the entire content of the node.
+    const std::vector<int> &preds = fn_.cfg()[phi.block].preds;
+    for (size_t i = 0; i < phi.ins.size(); ++i) {
       expr.operands.push_back(operand(phi, i, 0));
+      expr.operand_blocks.push_back(i < preds.size() ? preds[i] : -1);
+    }
     return make(std::move(expr));
   }
 
@@ -679,6 +686,8 @@ void render(std::ostringstream &os, ExprRef expr, int parent_precedence) {
       os << '(';
       for (size_t i = 0; i < expr->operands.size(); ++i) {
         if (i) os << ", ";
+        if (i < expr->operand_blocks.size())
+          os << expr->operand_blocks[i] << ": ";
         render(os, expr->operands[i], kLowest);
       }
       os << ')';
@@ -751,6 +760,12 @@ void emit(std::vector<Token> &out, ExprRef expr, int parent_precedence) {
       out.push_back({"punct", "(", ""});
       for (size_t i = 0; i < expr->operands.size(); ++i) {
         if (i) out.push_back({"punct", ",", ""});
+        // A phi says where each operand came from; the block token is what an
+        // interface renders as the label it prints that block under.
+        if (i < expr->operand_blocks.size()) {
+          out.push_back({"block", std::to_string(expr->operand_blocks[i]), ""});
+          out.push_back({"punct", ":", ""});
+        }
         emit(out, expr->operands[i], kLowest);
       }
       out.push_back({"punct", ")", ""});
@@ -770,6 +785,13 @@ std::vector<TokenBlock> tokenize(const Hil &hil, const SsaFunction &fn,
 
   for (const HilBlock &block : hil.blocks()) {
     const BasicBlock &raw = cfg[block.id];
+
+    // A block nothing can reach is not part of this function. The sweep is
+    // linear, so it decodes whatever was laid out after the last `ret` as
+    // well, and showing it means showing the next function's flag arithmetic
+    // under this one's name.
+    if (!fn.dominance().reachable(block.id))
+      continue;
 
     TokenBlock out;
     out.id = block.id;
@@ -860,10 +882,13 @@ std::string to_string(const Hil &hil, const SsaFunction &fn, const PassContext &
   for (const HilBlock &block : hil.blocks()) {
     const BasicBlock &raw = cfg[block.id];
 
+    // As in tokenize: what nothing can reach is what the linear sweep walked
+    // into after this function ended, not part of it.
+    if (!fn.dominance().reachable(block.id)) continue;
+
     os << "block " << block.id << " @ 0x" << std::hex << raw.start.getOffset()
        << std::dec;
     if (block.id == cfg.entry) os << " (entry)";
-    if (!fn.dominance().reachable(block.id)) os << " (unreachable)";
     os << ":";
     if (!raw.preds.empty()) {
       os << "  from";

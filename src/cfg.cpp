@@ -71,6 +71,11 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
   for (int count = 0; count < limits.max_instructions; ++count) {
     if (!limits.end.isInvalid() && !(addr < limits.end))
       break;
+    // Not code, and said so deliberately. Stopping rather than skipping is
+    // right: whatever follows a jump table is reached by a branch, and if
+    // nothing branches there it is not part of this function either.
+    if (limits.is_data && limits.is_data(addr.getOffset()))
+      break;
 
     PcodeCapture capture;
     TextAssembly text;

@@ -9,6 +9,7 @@
 #include "pcode.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -83,6 +84,14 @@ struct SweepLimits {
   // Stop when the sweep passes this address. Leave invalid to only bound by
   // max_instructions.
   Address end;
+
+  // Bytes somebody has said are not code. A sweep that walks into a jump
+  // table disassembles it, and the result is a function with the table's
+  // contents as instructions in the middle of it -- so "this is not code" has
+  // to be able to stop the disassembler, or it is only a note.
+  //
+  // Returns true for an address the sweep must not decode. Empty by default.
+  std::function<bool(uint64_t)> is_data;
 };
 
 // Linear sweep from `start`, splitting at p-code-op granularity.

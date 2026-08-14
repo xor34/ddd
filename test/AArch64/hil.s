@@ -43,7 +43,11 @@ Ldone:
 
 // A phi is still a phi -- its arguments come from other blocks and folding
 // them would move work across control flow.
-// CHECK: x0#3 = phi(x0#1, x0#2)
+//
+// Each argument says which predecessor it arrives from, because that is the
+// entire content of a phi: without it the node is a list of names, and which
+// branch produced which value is exactly what the reader came to find out.
+// CHECK: x0#3 = phi(1: x0#1, 2: x0#2)
 // CHECK: return
 
 // Nothing in the folded form mentions a raw p-code opcode for these.

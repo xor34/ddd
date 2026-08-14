@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ddd {
@@ -56,7 +57,38 @@ public:
   }
   uint64_t code_begin() const { return code_begin_; }
   uint64_t code_end() const { return code_end_; }
+
+  // A stretch someone said is not code, whatever the sweep decided. The sweep
+  // is a guess and a person who has read the bytes is not, so this outranks
+  // the code range -- which is what makes "this jump table is not a function"
+  // expressible.
+  void mark_data(uint64_t begin, uint64_t end) {
+    if (end > begin) data_.emplace_back(begin, end);
+  }
+  void clear_data_marks() { data_.clear(); }
+
+  // Only the deliberate marks, not the code range. The sweep asks this rather
+  // than is_code(): everything outside the code range is "data" as far as that
+  // is concerned, including the function it is about to disassemble.
+  bool marked_data(uint64_t addr) const {
+    for (const auto &range : data_)
+      if (addr >= range.first && addr < range.second) return true;
+    return false;
+  }
+
+  // Undoes a mark: this is code after all. Anything overlapping is dropped
+  // rather than split, because a mark is a statement about a stretch and half
+  // of one is not a smaller statement.
+  void unmark_data(uint64_t begin, uint64_t end) {
+    std::vector<std::pair<uint64_t, uint64_t>> kept;
+    for (const auto &range : data_)
+      if (range.second <= begin || range.first >= end) kept.push_back(range);
+    data_ = std::move(kept);
+  }
+
   bool is_code(uint64_t addr) const {
+    for (const auto &range : data_)
+      if (addr >= range.first && addr < range.second) return false;
     return addr >= code_begin_ && addr < code_end_;
   }
   bool is_data(uint64_t addr) const { return contains(addr) && !is_code(addr); }
@@ -67,6 +99,7 @@ private:
   bool big_endian_ = false;
   uint64_t code_begin_ = 0;
   uint64_t code_end_ = 0;
+  std::vector<std::pair<uint64_t, uint64_t>> data_;
 };
 
 // Hands the image to Sleigh. Reads outside the image return zero, which is

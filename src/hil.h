@@ -49,6 +49,11 @@ struct Expr {
   const SsaValue *value = nullptr; // Variable
   std::vector<ExprRef> operands;
   int precedence = 0;
+
+  // For a phi: which predecessor each operand arrives from, in the same order.
+  // A phi without them says `phi(a, b)` and leaves the reader to work out which
+  // branch produced which -- which is the only thing a phi is actually saying.
+  std::vector<int> operand_blocks;
 };
 
 enum class StatementKind {

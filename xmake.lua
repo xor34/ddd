@@ -14,6 +14,16 @@ set_project("sleigh_poc")
     add_requires("zlib")
     add_requires("abseil")
 
+    -- Everything above the engines is written in Lua: the readability passes,
+    -- the workflows that arrange them, and the whole interface.
+    --
+    -- The system's shared Lua, deliberately, rather than a private static one.
+    -- The interface is Lua code calling GTK through lgi, and lgi is a C module
+    -- built against the distribution's liblua -- it can only load into a
+    -- process that has those exact symbols in it. Statically linking our own
+    -- copy would give us two Lua runtimes and no interface.
+    add_requires("pkgconfig::lua", {alias = "lua"})
+
 
 local sleigh_dir = "third_party/sleigh"
 
@@ -112,12 +122,17 @@ target("sleigh_poc")
     add_files(
         "src/*.cc",
         "src/*.cpp",
+        "src/lua/*.cpp",
         "src/passes/*.cpp",
         "src/extractors/*.cpp"
     )
 
     add_deps("sla")
-    add_packages("abseil")
+    add_packages("abseil", "lua")
+
+    -- So a Lua C module loaded at runtime -- lgi, and anything else a plugin
+    -- requires -- resolves the interpreter's symbols against this process.
+    add_ldflags("-rdynamic", {force = true})
 
 -- `xmake check` -- build sleigh_poc, then run the lit-style suite in test/.
 -- Extra arguments go through to the runner, e.g.

@@ -1,0 +1,51 @@
+# Where the functions are in a file that does not say.
+#
+# This is not a tidiness feature. Every analysis in the pipeline is
+# per-function, so a "function" that is really the whole of .text glued
+# together has flags written in one function reaching a read in the next:
+# nothing is dead, nothing folds, and the listing degenerates into the raw
+# CF/OF/SF/PF arithmetic Sleigh emits for every instruction. Bounding the
+# functions is what makes a readable listing possible at all.
+#
+# RUN: rm -rf %t && mkdir -p %t
+# RUN: echo 'static int helper(int a, int b) { return a * b + 7; }' > %t/p.c
+# RUN: echo 'int compute(int n) { int t = 0; for (int i = 0; i < n; i++) t += helper(i, n); return t; }' >> %t/p.c
+# RUN: echo 'int main(void) { return compute(5); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+# RUN: strip %t/p
+
+# Stripped: the container knows nothing about functions any more.
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --functions 2>&1 \
+# RUN:   | FileCheck --check-prefix=STRIPPED %s
+
+# STRIPPED: 0 function(s)
+
+
+# But something calls them, and a call survives stripping. Each one is bounded
+# by control flow -- the last address reachable from its entry -- so it stops
+# where the function does rather than running on into the next one.
+#
+# RUN: printf 'functions\nquit\n' \
+# RUN:   | %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd --server \
+# RUN:   2>/dev/null | FileCheck --check-prefix=FOUND %s
+
+# FOUND: {"functions":[{"addr":
+# FOUND-SAME: "name":"sub_
+
+# The whole executable segment is thousands of bytes; a discovered function is
+# a function, so its size has at most three digits here.
+# FOUND-SAME: "size":{{[0-9][0-9]?[0-9]?,}}
+
+
+# And the listing of one is the function, not the segment: it ends at a return
+# rather than running into whatever was laid out next.
+#
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --region=0x400000:0x401000:x86-64 --raw --base=0x400000 2>/dev/null \
+# RUN:   | FileCheck --check-prefix=NOISE %s
+
+# The flag dance Sleigh emits for a compare must not survive into the listing:
+# with the function correctly bounded, the parity flag is dead and everything
+# feeding it goes with it.
+# NOISE-NOT: POPCOUNT
+# NOISE-NOT: PF =
