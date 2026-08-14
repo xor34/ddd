@@ -16,12 +16,22 @@
 -- the UI actually needs is not to be blocked, and yielding gives that without
 -- any of it.
 --
--- Each tick works to a deadline rather than to a count of items. A count is
--- wrong at both ends: four small functions is a wasted frame, and four large
--- ones is a visible stall. A deadline is the thing that was actually wanted.
+-- Two rules make it stay out of the way:
+--
+--   * each tick works to a deadline rather than to a count of items. A count is
+--     wrong at both ends: four small functions is a wasted frame, four large
+--     ones is a visible stall.
+--   * anything the user just did wins. Marking bytes as code invalidates the
+--     reference index, and the work to rebuild it must not be queued in front
+--     of the keystroke that comes next.
 local gtk = require "plugins.studio.gtk"
+local ddd = require "ddd"
 
 local GLib = gtk.GLib
+
+-- The window has a monotonic clock; the shared library is not allowed to know
+-- about one, so it is handed over here.
+ddd.ui.clock = function() return GLib.get_monotonic_time() / 1000 end
 
 local M = {}
 
@@ -29,11 +39,16 @@ local M = {}
 -- that a keystroke lands in the same frame it was pressed.
 local kBudget = 12
 
-local function now() return GLib.get_monotonic_time() / 1000 end
+-- How long to leave the background alone after the user does something. Long
+-- enough to cover the re-render an edit causes, short enough not to feel like
+-- the analysis has stopped.
+local kYield = 250
 
-local function later(work)
-  GLib.idle_add(GLib.PRIORITY_LOW, function() return work() end)
-end
+-- How often to look for new work once there is none: an edit invalidates the
+-- index, and this is what notices.
+local kIdlePoll = 700
+
+local function now() return ddd.ui.clock() end
 
 function M.start(ui)
   ui.analysed = ui.analysed or {}
@@ -45,77 +60,98 @@ function M.start(ui)
     if message then ui:status(message) end
   end
 
-  -- Phase one: references, then function boundaries. Both are sweeps of the
-  -- image, and both hand back control between slices.
-  local function index()
-    local deadline = now() + kBudget
-    local step
+  -- The functions still to put through the pipeline, rebuilt whenever the set
+  -- of functions changes.
+  local queue, at = {}, 1
 
-    -- The instruction budget bounds one slice; the deadline bounds the tick.
-    -- Both, because a slice that overruns is a dropped frame and a tick that
-    -- stops after one slice wastes the rest of it.
-    repeat
-      step = ui.session.analyse_step(5)
-    until step.finished or now() >= deadline
+  local function refill()
+    queue, at = {}, 1
 
-    announce(step.stage, step.done, step.total)
-
-    if not step.finished then return true end
-
-    -- Everything on screen was drawn without any of this: the listing had no
-    -- cross-references in it and the address it is showing may be inside a
-    -- function now.
-    ui:invalidate()
-    announce("functions", step.done, step.total,
-             ("%d function(s)"):format(step.done))
-
-    M.analyse(ui, announce)
-    return false
-  end
-
-  later(index)
-end
-
--- Phase two: each function through the pipeline. The one being looked at goes
--- first, so what is on screen stops being provisional immediately.
-function M.analyse(ui, announce)
-  local functions = ui.session.functions()
-  local order = {}
-
-  local here = ui.focus or ui.addr
-  local first = here and ui.session.function_at(here)
-  if first then order[#order + 1] = first.addr end
-  for _, func in ipairs(functions) do
-    if not first or func.addr ~= first.addr then order[#order + 1] = func.addr end
-  end
-
-  local index, done = 1, 0
-  announce("analysing", 0, #order)
-
-  later(function()
-    local deadline = now() + kBudget
-
-    repeat
-      local addr = order[index]
-      if not addr then break end
-      index = index + 1
-
-      -- Asking for the listing is what runs the pipeline; the context keeps
-      -- it, so looking at this function later is then instant.
-      local ok, listing = pcall(ui.listing, ui, addr)
-      if ok and listing and listing.ok then
-        ui.analysed[addr] = true
-        done = done + 1
-      end
-    until now() >= deadline
-
-    if index > #order then
-      announce("done", done, #order, ("analysed %d function(s)"):format(done))
-      return false
+    local here = ui.focus or ui.addr
+    local first = here and ui.session.function_at(here)
+    if first and not ui.analysed[first.addr] then
+      queue[#queue + 1] = first.addr
     end
 
-    announce("analysing", done, #order)
-    return true
+    for _, func in ipairs(ui.session.functions()) do
+      if not ui.analysed[func.addr]
+         and not (first and func.addr == first.addr) then
+        queue[#queue + 1] = func.addr
+      end
+    end
+  end
+
+  local sweeping = true
+
+  GLib.timeout_add(GLib.PRIORITY_LOW, 16, function()
+    -- Whatever the user just did comes first. This is a single thread: the
+    -- only way to service them before the queue is to get out of the way.
+    if ui.last_action and now() - ui.last_action < kYield then
+      return true
+    end
+
+    local deadline = now() + kBudget
+
+    -- Phase one: references, then function boundaries. Both are sweeps of the
+    -- image, and both hand back control between slices. An edit puts this back
+    -- into `sweeping` -- the index it invalidated has to be rebuilt, and the
+    -- one already there answers questions meanwhile.
+    if sweeping then
+      local step
+      repeat
+        step = ui.session.analyse_step(1500)
+      until step.finished or now() >= deadline
+
+      announce(step.stage, step.done, step.total)
+      if not step.finished then return true end
+
+      sweeping = false
+      ui:invalidate()
+      refill()
+      announce("analysing", 0, #queue)
+      return true
+    end
+
+    -- Phase two: each function through the pipeline. Asking for the listing is
+    -- what runs it; the context keeps it, so looking at that function later is
+    -- instant.
+    if at <= #queue then
+      repeat
+        local addr = queue[at]
+        at = at + 1
+
+        if addr then
+          local ok, listing = pcall(ui.listing, ui, addr)
+          if ok and listing and listing.ok then ui.analysed[addr] = true end
+        end
+      until at > #queue or now() >= deadline
+
+      announce("analysing", at - 1, #queue)
+      if at > #queue then
+        announce("done", #queue, #queue,
+                 ("analysed %d function(s)"):format(#queue))
+      end
+      return true
+    end
+
+    -- Nothing to do. An edit will have invalidated the index, which
+    -- analyse_step reports by not being finished; look again shortly rather
+    -- than spinning.
+    local step = ui.session.analyse_step(1)
+    if not step.finished then
+      sweeping = true
+      return true
+    end
+
+    refill()
+    if #queue > 0 then return true end
+
+    GLib.timeout_add(GLib.PRIORITY_LOW, kIdlePoll, function()
+      sweeping = true
+      M.start(ui)
+      return false
+    end)
+    return false
   end)
 end
 

@@ -18,7 +18,19 @@ M.colour = {
   muted       = "#828b98",
   accent      = "#4d9cf6",
   selection   = "#2c3b52",
-  highlight   = "#3b4c66", -- the other occurrences of what the cursor is on
+
+  -- Three things paint a background, and they have to be told apart at a
+  -- glance -- including when they are on top of each other, which is the
+  -- normal case: the occurrences of a variable are usually on the line the
+  -- cursor is on.
+  --
+  -- So the line is the faintest lift the page allows, and the highlight is
+  -- warm where everything else is cool. Two shades of the same blue read as
+  -- one thing.
+  cursorline  = "#242b38", -- the line the cursor is on
+  highlight   = "#553f1c", -- every occurrence of what is selected
+  landed      = "#2f5d8a", -- where a jump came out, for a moment
+
   warning     = "#e5a04a",
 }
 

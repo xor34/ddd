@@ -58,13 +58,24 @@ local function make_tags(buffer, theme)
 
   tag("default", { foreground = theme.colour.text })
   tag("heading", { foreground = theme.colour.text, weight = 700 })
-  tag("highlight", { background = theme.colour.highlight })
+
+  -- Every occurrence of what is selected. Warm, and underlined: the cursor is
+  -- usually sitting on one of them, so a background alone has to be readable
+  -- on top of the line's own background -- and two shades of the same blue are
+  -- not.
+  tag("highlight", { background = theme.colour.highlight,
+                     underline = gtk.Pango.Underline.SINGLE })
 
   -- The line the cursor is on, which is not the same as what is on screen:
   -- scrolling moves the view, j and k move the cursor, and the two only meet
-  -- when the cursor would otherwise go out of sight.
-  tag("cursorline", { background = theme.colour.selection,
-                      paragraph_background = theme.colour.selection })
+  -- when the cursor would otherwise go out of sight. The faintest lift that
+  -- reads as a line, because everything else has to show through it.
+  tag("cursorline", { paragraph_background = theme.colour.cursorline })
+
+  -- Landing somewhere after a jump. Held for a moment and then dropped: the
+  -- hard part of following a reference is working out where you came out, and
+  -- a line that lights up answers it before you have started reading.
+  tag("landed", { paragraph_background = theme.colour.landed })
 
   return tags
 end
@@ -148,6 +159,12 @@ function M.build(ui, options)
       return true
     elseif name == "k" or name == "Up" then
       self:move_cursor(-1)
+      return true
+    elseif name == "w" then
+      self:move_word(1)
+      return true
+    elseif name == "b" then
+      self:move_word(-1)
       return true
     elseif name == "Return" or name == "KP_Enter" then
       local line = self.cursor_line and self.lines[self.cursor_line]
@@ -316,6 +333,7 @@ function View:show(addr)
     if landed and addr - landed <= kNearEnough then
       self:reveal(addr)
       self:highlight(self.selected_id)
+      self:flash(addr)
       return
     end
   end
@@ -323,6 +341,7 @@ function View:show(addr)
   self:render(from, to, addr)
   self:reveal(addr)
   self:publish_viewport()
+  self:flash(addr)
 
   -- The cursor goes where the view went, so the keyboard carries on from
   -- whatever was navigated to.
@@ -506,31 +525,29 @@ function View:paint_gap(paint, from, to, focus)
     self:mark_line(start + offset, paint.line)
     paint:put(("  %08x  "):format(start + offset), "address")
 
-    -- One token per byte, each carrying its own address.
+    -- Every byte is addressable, and none of them is a table.
     --
-    -- Marking bytes as code is the reason this view exists, and a row that is
-    -- one token can only offer the address it starts at -- so anything not on
-    -- a sixteen-byte boundary would be unreachable. Clicking a byte has to
-    -- select that byte.
-    local record = { addr = start + offset, tokens = {} }
-    local text = {}
+    -- Marking bytes as code is the reason this view exists, so a row cannot be
+    -- one token offering only the address it starts at -- anything not on a
+    -- sixteen-byte boundary would be unreachable. But a token per byte over a
+    -- region of any size is hundreds of thousands of small allocations per
+    -- render, which is most of what a whole-region dump costs. The layout is
+    -- fixed, so the byte under a column is arithmetic: the row records where
+    -- its first byte was painted, and `hex_token` works out the rest.
+    local record = {
+      addr = start + offset,
+      hex = { addr = start + offset, first = paint.column, line = paint.line },
+    }
 
+    -- Two puts for the row, not thirty-five. Each one measures its text and
+    -- records a tag range, and a region of any size is thousands of rows; the
+    -- colours only change twice across a row, so the string is assembled first
+    -- and handed over whole.
+    local hex, text = {}, {}
     for i = 1, 16 do
       local byte = row:byte(i)
-      local at = start + offset + i - 1
-      local column = paint.column
-      local from, to = paint:put(byte and ("%02x"):format(byte) or "  ", "const")
-
-      if byte then
-        record.tokens[#record.tokens + 1] = {
-          from = from, to = to, column = column,
-          width = paint.column - column,
-          at = at,
-          text = ("%02x"):format(byte),
-        }
-      end
-
-      paint:put(i == 8 and "  " or " ")
+      hex[#hex + 1] = byte and ("%02x"):format(byte) or "  "
+      hex[#hex + 1] = i == 8 and "  " or " "
 
       -- The printable column is where a string in the middle of a blob shows
       -- itself, which is usually why you are looking at raw bytes at all.
@@ -538,7 +555,9 @@ function View:paint_gap(paint, from, to, focus)
         and string.char(byte) or (byte and "." or " ")
     end
 
-    paint:put("  " .. table.concat(text), "string")
+    record.hex.count = #row
+    paint:put(table.concat(hex), "const")
+    paint:put(" " .. table.concat(text), "string")
 
     self.lines[paint.line] = record
     paint:newline()
@@ -835,13 +854,42 @@ function View:at_iter(iter)
   return self:token_at(line, iter:get_line_offset()), line
 end
 
+-- The byte a column of a hexdump row is over, worked out rather than looked
+-- up. Two hex digits and a space each, with an extra space after the eighth.
+function View:hex_token(hex, column)
+  if not hex then return nil end
+
+  local relative = column - hex.first
+  if relative < 0 then return nil end
+  if relative >= 8 * 3 then relative = relative - 1 end
+
+  local index = relative // 3
+  if index < 0 or index >= (hex.count or 16) then return nil end
+
+  local at = hex.addr + index
+  local first = hex.first + index * 3 + (index >= 8 and 1 or 0)
+
+  -- Where it is in the buffer, for the highlight.
+  local from = self.buffer:get_iter_at_line_offset(hex.line, first)
+  local to = self.buffer:get_iter_at_line_offset(hex.line, first + 2)
+
+  return {
+    at = at,
+    column = first,
+    width = 2,
+    from = from and from:get_offset(),
+    to = to and to:get_offset(),
+  }
+end
+
 function View:token_at(line, column)
   for _, token in ipairs(line.tokens or {}) do
     if column >= token.column and column < token.column + token.width then
       return token
     end
   end
-  return nil
+
+  return self:hex_token(line.hex, column)
 end
 
 -- ---- the cursor ----------------------------------------------------------
@@ -882,9 +930,50 @@ function View:set_cursor(line, options)
     end
   end
 
+  if not chosen and record.hex then
+    local wanted = options.at and (options.at - record.hex.addr) or 0
+    if wanted < 0 or wanted >= (record.hex.count or 16) then wanted = 0 end
+    chosen = self:hex_token(record.hex,
+                            record.hex.first + wanted * 3
+                            + (wanted >= 8 and 1 or 0))
+  end
+
   self:select(chosen, record, { keep_cursor = true })
 
   if not options.no_scroll then self:reveal_line(line) end
+end
+
+-- Light up where a jump landed, briefly.
+--
+-- Following a reference moves you somewhere in a page of similar-looking
+-- lines, and working out which one is the one you asked for is a real cost --
+-- the more so when the target was already on screen and nothing appears to
+-- have happened at all.
+function View:flash(addr)
+  local line = self:line_for(addr)
+  if not line then return end
+
+  local buffer = self.buffer
+  local from = buffer:get_iter_at_line(line)
+  local to = buffer:get_iter_at_line(line + 1) or buffer:get_end_iter()
+  if not from then return end
+
+  buffer:remove_tag(self.tags.landed, buffer:get_start_iter(),
+                    buffer:get_end_iter())
+  buffer:apply_tag(self.tags.landed, from, to or buffer:get_end_iter())
+
+  -- One timer, restarted: jumping twice in quick succession should leave one
+  -- line lit, not two.
+  self.flash_id = (self.flash_id or 0) + 1
+  local mine = self.flash_id
+
+  gtk.GLib.timeout_add(gtk.GLib.PRIORITY_DEFAULT, 450, function()
+    if self.flash_id == mine then
+      buffer:remove_tag(self.tags.landed, buffer:get_start_iter(),
+                        buffer:get_end_iter())
+    end
+    return false
+  end)
 end
 
 -- Just enough scrolling to bring a line into view, rather than centring it:
@@ -900,6 +989,68 @@ function View:reveal_line(line)
   end
 
   self.view:scroll_to_mark(self.cursor_mark, 0.08, false, 0.0, 0.0)
+end
+
+-- Sideways: the next thing on the line rather than the next line. In code that
+-- is the next token; in a hexdump it is the next byte, which is how you get to
+-- one without aiming at it with the pointer.
+function View:move_word(delta)
+  local line = self.cursor_line
+  local record = line and self.lines[line]
+  if not record then
+    self:move_cursor(delta)
+    return
+  end
+
+  local column = self.selected_column
+
+  -- A hexdump row: step by bytes, and off the end of one row onto the next.
+  if record.hex then
+    local index = 0
+    if column then
+      local relative = column - record.hex.first
+      if relative >= 8 * 3 then relative = relative - 1 end
+      index = relative // 3
+    end
+
+    local wanted = index + delta
+    if wanted >= 0 and wanted < (record.hex.count or 16) then
+      local at = record.hex.addr + wanted
+      self:select(self:hex_token(record.hex,
+                                 record.hex.first + wanted * 3
+                                 + (wanted >= 8 and 1 or 0)),
+                  record, { keep_cursor = true })
+      self.ui.focus = at
+      return
+    end
+
+    self:move_cursor(delta)
+    return
+  end
+
+  -- A line of code: the next token along, in the order they were painted.
+  local tokens = record.tokens or {}
+  local chosen
+
+  for _, token in ipairs(tokens) do
+    if delta > 0 then
+      if (not column or token.column > column)
+         and (not chosen or token.column < chosen.column) then
+        chosen = token
+      end
+    else
+      if (not column or token.column < column)
+         and (not chosen or token.column > chosen.column) then
+        chosen = token
+      end
+    end
+  end
+
+  if chosen then
+    self:select(chosen, record, { keep_cursor = true })
+  else
+    self:move_cursor(delta)
+  end
 end
 
 -- The next line that is about something -- an address, a byte, a reference.
@@ -951,6 +1102,7 @@ function View:select(token, line, options)
   ui:emit("select", addr)
 
   self.selected_id = token and token.id or nil
+  self.selected_column = token and token.column or nil
   -- A byte has no identity to match elsewhere, so the highlight is just that
   -- byte -- which is what tells you which one you are about to mark.
   self.selected_range = (not self.selected_id and token and token.at and token.from)

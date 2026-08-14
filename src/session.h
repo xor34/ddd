@@ -191,6 +191,11 @@ public:
   // `budget` is the instructions to decode in one go. Smaller is smoother.
   AnalysisStep analyse_step(int budget = 20000);
 
+  // Says the reference index is out of date, without throwing it away: an edit
+  // that changes what is code changes what refers to what, but the answers
+  // that are already there are better than none while the new ones are built.
+  void invalidate_index();
+
   // Adds one, overriding whatever discovery decided. What a plugin that knows
   // better -- a signature, a prologue scan, a person -- calls.
   void define_function(uint64_t begin, uint64_t end, std::string name);
@@ -329,6 +334,12 @@ private:
   bool discovered_ = false;
 
   RegionTree tree_;
+
+  // Re-indexing after an edit builds into this one, and it is swapped in when
+  // it is finished. Dropping the index instead would be correct and unusable:
+  // the next question about references would rebuild the whole thing on the
+  // spot, which is a sweep of the image with the window waiting on it.
+  std::unique_ptr<Xrefs> pending_xrefs_;
 
   // Where the slice-at-a-time analysis has got to.
   size_t index_region_ = 0;   // which code region is being indexed

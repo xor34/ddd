@@ -18,6 +18,11 @@ M.theme = theme
 M.views = {}
 M.commands = {}
 
+-- Milliseconds, monotonically -- or as close as the standard library gets. An
+-- interface with a real clock replaces this; nothing here may reach for a
+-- toolkit to find one.
+M.clock = function() return os.clock() * 1000 end
+
 -- How much of a thing to put on screen before saying how much more there is.
 --
 -- Every one of these has a real case behind it: a string constant referenced
@@ -251,6 +256,11 @@ function Context:commands_available()
 end
 
 function Context:run(name, ...)
+  -- When the user last did something. Background work reads this and gets out
+  -- of the way: an edit invalidates the reference index, and rebuilding it
+  -- must not be queued in front of the next keystroke.
+  self.last_action = M.clock()
+
   local command = M.find_command(name)
   if not command then
     self:status(("no command called %s"):format(name))

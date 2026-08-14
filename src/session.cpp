@@ -288,11 +288,28 @@ bool Session::bound_start(size_t index) {
   return true;
 }
 
+// Marking an edit rather than undoing the work.
+//
+// Changing what is code changes what refers to what, so the index is wrong --
+// but the version that is already built is far better than nothing while a new
+// one is made, and throwing it away means the next question about references
+// rebuilds the whole thing on the spot, with the window waiting.
+void Session::invalidate_index() {
+  pending_xrefs_ = std::make_unique<Xrefs>();
+  index_region_ = 0;
+  index_at_ = 0;
+  indexed_ = false;
+
+  // Function discovery rests on the index, so it is out of date too -- but the
+  // functions already found stay until better ones replace them.
+  discovered_ = false;
+}
+
 Session::AnalysisStep Session::analyse_step(int budget) {
   AnalysisStep step;
 
-  if (xrefs_ == nullptr) {
-    xrefs_ = std::make_unique<Xrefs>();
+  if (xrefs_ == nullptr && pending_xrefs_ == nullptr) {
+    pending_xrefs_ = std::make_unique<Xrefs>();
     index_region_ = 0;
     index_at_ = 0;
     indexed_ = false;
@@ -321,7 +338,7 @@ Session::AnalysisStep Session::analyse_step(int budget) {
         continue;
       }
 
-      xrefs_->add(lifted->cfg, "");
+      pending_xrefs_->add(lifted->cfg, "");
 
       // Where the sweep actually stopped; if it made no progress, give up on
       // this region rather than spin.
@@ -338,7 +355,11 @@ Session::AnalysisStep Session::analyse_step(int budget) {
       return step;
     }
 
+    // Finished: the new index replaces the old one in one step, so nothing
+    // ever sees a half-built one.
     indexed_ = true;
+    xrefs_ = std::move(pending_xrefs_);
+
     log() << xrefs_->size() << " reference(s)\n";
     collect_starts();
     step.done = 0;
@@ -620,11 +641,15 @@ Listing Session::listing_at(uint64_t address, const ListingRequest &request) {
 }
 
 void Session::build_xrefs() {
-  if (indexed_)
+  // An index that exists answers now, even if an edit has made it stale: the
+  // replacement is being built in the background, and blocking a question
+  // about references on a sweep of the image is the thing this is for.
+  if (xrefs_ != nullptr)
     return;
 
-  // Indexing runs to completion here; analyse_step() is the version that
-  // yields, for a caller with a window to keep drawing.
+  // Nothing at all to answer with, so it runs to completion here.
+  // analyse_step() is the version that yields, for a caller with a window to
+  // keep drawing.
   while (!indexed_)
     analyse_step();
 }
@@ -710,7 +735,10 @@ HexView Session::hex(uint64_t address, uint64_t length) {
   view.addr = address;
   view.code = image_->is_code(address);
 
-  if (length == 0 || length > 4096)
+  // No small ceiling: a listing that shows a data region shows all of it, and
+  // the caller has already decided how much that is. Reads stop at the edge of
+  // the image regardless.
+  if (length == 0)
     length = 256;
 
   for (uint64_t i = 0; i < length; ++i) {
@@ -776,7 +804,7 @@ std::string Session::undefine_at(uint64_t address, int levels) {
     image_->unmark_data(begin, finish);
     project_.unmark_data(begin, finish);
     project_.remove_marks(begin, finish);
-    xrefs_.reset();
+    invalidate_index();
 
   } else {
     tree_.remove(id);
@@ -856,7 +884,7 @@ void Session::clear_data_over(uint64_t begin, uint64_t end) {
     }
   }
 
-  xrefs_.reset();
+  invalidate_index();
 }
 
 uint64_t Session::define_code(uint64_t address) {
@@ -1028,7 +1056,7 @@ void Session::define_data(uint64_t begin, uint64_t end) {
   tree_.set_user_defined(id, true);
   tree_.clear_children(id);
 
-  xrefs_.reset();
+  invalidate_index();
 
   save_project();
 }
@@ -1060,7 +1088,7 @@ bool Session::add_region(uint64_t begin, uint64_t end, const std::string &spec,
 
   // A new stretch of code is new places to find functions and new references.
   discovered_ = false;
-  xrefs_.reset();
+  invalidate_index();
 
   Project::RegionSpec recorded;
   recorded.begin = begin;
