@@ -24,7 +24,7 @@ local M = {}
 -- does not analyse all of them before drawing anything.
 local kBefore = 1
 local kAfter = 6
-local kLineBudget = 2500
+local kLineBudget = 40000
 
 -- How much of a stretch of undefined bytes to dump before eliding the rest.
 -- Enough to recognise what it is; not so much that scrolling past a megabyte
@@ -59,6 +59,12 @@ local function make_tags(buffer, theme)
   tag("default", { foreground = theme.colour.text })
   tag("heading", { foreground = theme.colour.text, weight = 700 })
   tag("highlight", { background = theme.colour.highlight })
+
+  -- The line the cursor is on, which is not the same as what is on screen:
+  -- scrolling moves the view, j and k move the cursor, and the two only meet
+  -- when the cursor would otherwise go out of sight.
+  tag("cursorline", { background = theme.colour.selection,
+                      paragraph_background = theme.colour.selection })
 
   return tags
 end
@@ -128,6 +134,30 @@ function M.build(ui, options)
     end)
   end
   self.view:add_controller(click)
+
+  -- Moving the cursor, on the view rather than on the window: a text view eats
+  -- the arrow keys to move its own insertion point, so these have to be taken
+  -- before it sees them. Everything else bubbles up to the window's keymap.
+  local keys = Gtk.EventControllerKey()
+  keys.propagation_phase = Gtk.PropagationPhase.CAPTURE
+  keys.on_key_pressed = function(_, keyval)
+    local name = gtk.Gdk.keyval_name(keyval)
+
+    if name == "j" or name == "Down" then
+      self:move_cursor(1)
+      return true
+    elseif name == "k" or name == "Up" then
+      self:move_cursor(-1)
+      return true
+    elseif name == "Return" or name == "KP_Enter" then
+      local line = self.cursor_line and self.lines[self.cursor_line]
+      self:follow(line and line.tokens and line.tokens[1], line)
+      return true
+    end
+
+    return false
+  end
+  self.view:add_controller(keys)
 
   self.widget = gtk.scrolled(self.view, { class = "ddd-listing" })
 
@@ -293,6 +323,10 @@ function View:show(addr)
   self:render(from, to, addr)
   self:reveal(addr)
   self:publish_viewport()
+
+  -- The cursor goes where the view went, so the keyboard carries on from
+  -- whatever was navigated to.
+  self:set_cursor(self:line_for(addr), { no_scroll = true, at = addr })
 end
 
 -- What to draw, in address order: the functions in the window, and the
@@ -442,69 +476,82 @@ function View:paint_gap(paint, from, to, focus)
     end
   end
 
+  -- The heading does not claim the region's first address: the row of bytes
+  -- below it does, and going to that address should land on the bytes rather
+  -- than on the title above them. (When the dump starts further in, nothing
+  -- else can claim it, and the marker below takes it instead.)
   self.lines[paint.line] = { addr = from }
-  self:mark_line(from, paint.line)
   paint:put(label, "heading")
   paint:put(("  0x%x-0x%x  %d byte%s"):format(from, to, size,
                                               size == 1 and "" or "s"),
             "address")
   paint:newline()
 
-  -- Which part of it to dump.
+  -- All of it.
   --
-  -- Not always the beginning. A data region can be a hundred kilobytes, and
-  -- going to an address in the middle of one has to *land* there -- dumping
-  -- the first five hundred bytes and stopping means the address has no line,
-  -- and navigation quietly leaves you wherever the nearest line happens to be,
-  -- which can be the top of the region or the top of the window.
+  -- Marking bytes as code is done by looking at them, and anything not shown
+  -- cannot be clicked -- so a region is dumped from its first byte to its last
+  -- rather than windowed around wherever you happen to be. The cap below is a
+  -- backstop against a pathological image, not a display decision; every data
+  -- region in an ordinary binary is well inside it.
   local start = from
-  if focus and focus >= from and focus < to and size > kGapBytes then
-    start = focus - kGapBytes // 2
-    if start + kGapBytes > to then start = to - kGapBytes end
-    if start < from then start = from end
-    start = start - (start % 16)
-    if start < from then start = from end
-  end
-
   local shown = math.min(to - start, kGapBytes)
+
   local view = ui.session.hex(start, shown)
   local bytes = view.bytes or ""
-
-  if start > from then
-    self.lines[paint.line] = { addr = from }
-    paint:put(("  ... %d byte%s before"):format(start - from,
-                                                start - from == 1 and "" or "s"),
-              "comment")
-    paint:newline()
-  end
 
   for offset = 0, #bytes - 1, 16 do
     local row = bytes:sub(offset + 1, offset + 16)
 
-    self.lines[paint.line] = { addr = start + offset }
     self:mark_line(start + offset, paint.line)
-
     paint:put(("  %08x  "):format(start + offset), "address")
 
-    local hex, text = {}, {}
+    -- One token per byte, each carrying its own address.
+    --
+    -- Marking bytes as code is the reason this view exists, and a row that is
+    -- one token can only offer the address it starts at -- so anything not on
+    -- a sixteen-byte boundary would be unreachable. Clicking a byte has to
+    -- select that byte.
+    local record = { addr = start + offset, tokens = {} }
+    local text = {}
+
     for i = 1, 16 do
       local byte = row:byte(i)
-      hex[#hex + 1] = byte and ("%02x"):format(byte) or "  "
+      local at = start + offset + i - 1
+      local column = paint.column
+      local from, to = paint:put(byte and ("%02x"):format(byte) or "  ", "const")
+
+      if byte then
+        record.tokens[#record.tokens + 1] = {
+          from = from, to = to, column = column,
+          width = paint.column - column,
+          at = at,
+          text = ("%02x"):format(byte),
+        }
+      end
+
+      paint:put(i == 8 and "  " or " ")
+
       -- The printable column is where a string in the middle of a blob shows
       -- itself, which is usually why you are looking at raw bytes at all.
       text[#text + 1] = byte and byte >= 0x20 and byte < 0x7f
         and string.char(byte) or (byte and "." or " ")
     end
 
-    paint:put(table.concat(hex, " ", 1, 8) .. "  "
-              .. table.concat(hex, " ", 9, 16), "const")
-    paint:put("   " .. table.concat(text), "string")
+    paint:put("  " .. table.concat(text), "string")
+
+    self.lines[paint.line] = record
     paint:newline()
   end
 
+  -- Only if the backstop bit, which for an ordinary binary it does not.
   local after = to - (start + shown)
   if after > 0 then
-    self.lines[paint.line] = { addr = start + shown }
+    self.lines[paint.line] = {
+      addr = start + shown,
+      target = start + shown,
+      tokens = { { column = 0, width = math.huge, addr = start + shown } },
+    }
     paint:put(("  ... %d more byte%s"):format(after, after == 1 and "" or "s"),
               "comment")
     paint:newline()
@@ -521,10 +568,39 @@ function View:paint_function(paint, listing, info)
   -- block starts: an instruction can lower to no p-code at all, so an x86-64
   -- PLT stub's first block begins four bytes in. Without this, following a
   -- call to one finds no line for the address it was told to go to.
-  self.lines[paint.line] = { addr = listing.addr }
+  self.lines[paint.line] = { addr = listing.addr, signature = true }
   self:mark_line(listing.addr, paint.line)
 
-  paint:put(("%s"):format(listing.name), "heading")
+  -- The prototype is the heading, when there is one. It is the most useful
+  -- line about a function -- what it takes and what it gives back -- and
+  -- keeping it in a comment underneath made it something you had to go and
+  -- look for. Double-clicking it opens the editor.
+  local written = self.ui.session.signature(listing.addr)
+  local signature = written and ddd.parse_signature(written)
+
+  if signature then
+    paint:put(("%s "):format(signature.result or "void"), "cast")
+    paint:put(listing.name, "heading")
+    paint:put("(", "punct")
+
+    for index, parameter in ipairs(signature.parameters) do
+      if index > 1 then paint:put(", ", "punct") end
+
+      local kind = parameter.type or "void *"
+      paint:put(kind, "cast")
+      paint:put(kind:sub(-1) == "*" and "" or " ")
+      paint:put(parameter.name or "arg", "var")
+      if parameter.at then
+        paint:put(" @ ", "punct")
+        paint:put(parameter.at, "address")
+      end
+    end
+    paint:put(")", "punct")
+  else
+    paint:put(listing.name, "heading")
+    paint:put("()", "punct")
+  end
+
   paint:put(("  0x%x-0x%x"):format(listing.addr, listing["end"]), "address")
   paint:newline()
 
@@ -591,9 +667,13 @@ function View:paint_function(paint, listing, info)
     end
 
     for _, comment in ipairs(block.comments) do
-      paint:put("  ; " .. comment, "comment")
-      self.lines[paint.line] = { addr = block.addr }
-      paint:newline()
+      -- The prototype is the heading now; saying it twice is just noise. The
+      -- text listing still wants the comment, which is why the pass emits it.
+      if not (block.entry and comment:sub(1, 11) == "signature: ") then
+        paint:put("  ; " .. comment, "comment")
+        self.lines[paint.line] = { addr = block.addr }
+        paint:newline()
+      end
     end
 
     for _, line in ipairs(block.lines) do
@@ -764,9 +844,93 @@ function View:token_at(line, column)
   return nil
 end
 
-function View:select(token, line)
+-- ---- the cursor ----------------------------------------------------------
+--
+-- A line the keyboard moves, separate from what is scrolled into view.
+-- Scrolling is for reading; the cursor is what the commands act on, and moving
+-- it only scrolls when it would otherwise leave the screen.
+
+function View:set_cursor(line, options)
+  options = options or {}
+  if not line or not self.lines[line] then return end
+
+  local buffer = self.buffer
+  buffer:remove_tag(self.tags.cursorline, buffer:get_start_iter(),
+                    buffer:get_end_iter())
+
+  local from = buffer:get_iter_at_line(line)
+  local to = buffer:get_iter_at_line(line + 1) or buffer:get_end_iter()
+  if from then
+    buffer:apply_tag(self.tags.cursorline, from, to or buffer:get_end_iter())
+  end
+
+  self.cursor_line = line
+
+  -- Selecting something on the line, so that a command acting on "what is
+  -- selected" has something to act on after a keyboard move. The byte that was
+  -- actually asked for, when one was: going to an address in the middle of a
+  -- row should select that byte, not the start of the row.
+  local record = self.lines[line]
+  local chosen = record.tokens and record.tokens[1] or nil
+
+  if options.at and record.tokens then
+    for _, token in ipairs(record.tokens) do
+      if token.at == options.at then
+        chosen = token
+        break
+      end
+    end
+  end
+
+  self:select(chosen, record, { keep_cursor = true })
+
+  if not options.no_scroll then self:reveal_line(line) end
+end
+
+-- Just enough scrolling to bring a line into view, rather than centring it:
+-- moving down one line should move the page by one line, not jump.
+function View:reveal_line(line)
+  local iter = self.buffer:get_iter_at_line(line)
+  if not iter then return end
+
+  if not self.cursor_mark or self.cursor_mark:get_deleted() then
+    self.cursor_mark = self.buffer:create_mark("ddd-cursor", iter, false)
+  else
+    self.buffer:move_mark(self.cursor_mark, iter)
+  end
+
+  self.view:scroll_to_mark(self.cursor_mark, 0.08, false, 0.0, 0.0)
+end
+
+-- The next line that is about something -- an address, a byte, a reference.
+-- Blank lines and headings between functions are skipped, so holding j walks
+-- the listing rather than the page.
+function View:move_cursor(delta)
+  local line = self.cursor_line
+  if not line then
+    line = self:line_for(self.ui.focus or self.ui.addr)
+    if line then self:set_cursor(line) end
+    return
+  end
+
+  local at = line + delta
+  local limit = self.buffer:get_line_count()
+
+  while at >= 0 and at < limit do
+    if self.lines[at] then
+      self:set_cursor(at)
+      return
+    end
+    at = at + delta
+  end
+end
+
+function View:select(token, line, options)
+  options = options or {}
   local ui = self.ui
-  local addr = (line and line.addr) or ui.addr
+  -- A byte in a hexdump is its own address; a token in a line of code is part
+  -- of the statement at that line's address.
+  local addr = (token and token.at) or (line and line.addr) or ui.addr
 
   ui.selection = {
     id = token and token.id,
@@ -787,11 +951,29 @@ function View:select(token, line)
   ui:emit("select", addr)
 
   self.selected_id = token and token.id or nil
+  -- A byte has no identity to match elsewhere, so the highlight is just that
+  -- byte -- which is what tells you which one you are about to mark.
+  self.selected_range = (not self.selected_id and token and token.at and token.from)
+    and { from = token.from, to = token.to } or nil
   self:highlight(self.selected_id)
+
+  -- A click moves the cursor line too, so the keyboard carries on from where
+  -- the pointer left off.
+  if not options.keep_cursor and line then
+    for number, record in pairs(self.lines) do
+      if record == line then
+        self:set_cursor(number, { no_scroll = true })
+        break
+      end
+    end
+  end
 
   if self.selected_id then
     ui:status(("%s -- %d occurrence(s); n renames it")
       :format(self.selected_id, #(self.by_id[self.selected_id] or {})))
+  elseif token and token.at then
+    ui:status(("0x%x  %s   c makes it code, a a string, ctrl+d data")
+      :format(token.at, token.text or ""))
   elseif line and line.addr then
     ui:status(("0x%x"):format(line.addr))
   end
@@ -801,7 +983,16 @@ function View:highlight(id)
   local buffer = self.buffer
   buffer:remove_tag(self.tags.highlight, buffer:get_start_iter(),
                     buffer:get_end_iter())
-  if not id then return end
+
+  if not id then
+    local range = self.selected_range
+    if range then
+      buffer:apply_tag(self.tags.highlight,
+                       buffer:get_iter_at_offset(range.from),
+                       buffer:get_iter_at_offset(range.to))
+    end
+    return
+  end
 
   for _, place in ipairs(self.by_id[id] or {}) do
     buffer:apply_tag(self.tags.highlight, buffer:get_iter_at_offset(place.from),
@@ -810,6 +1001,12 @@ function View:highlight(id)
 end
 
 function View:follow(token, line)
+  -- The heading is the prototype; following it means editing it.
+  if line and line.signature then
+    self.ui:run("signature")
+    return
+  end
+
   local target = (token and token.addr) or (line and line.target)
   if target then self.ui:navigate(target) end
 end

@@ -30,6 +30,30 @@ end
 
 ddd.workflow "studio" {
   ui = function(scope)
+    -- The one IDA has on ctrl+L and everyone else has on ctrl+P: a box over the
+    -- middle of the window, type a name, be there.
+    scope.command "functions" {
+      title = "Jump to a function",
+      key = "<control>l",
+      run = function(ui) require("plugins.studio.finder").open(ui) end,
+    }
+
+    scope.command "find" {
+      title = "Jump to a function (search)",
+      key = "<control>f",
+      run = function(ui) require("plugins.studio.finder").open(ui) end,
+    }
+
+    -- Escape goes back, which is what it does in IDA and what everyone tries
+    -- first after following a call.
+    scope.command "escape" {
+      title = "Back (escape)",
+      key = "Escape",
+      run = function(ui)
+        if not ui:back() then ui:status("nowhere to go back to") end
+      end,
+    }
+
     scope.command "goto" {
       title = "Go to address or symbol",
       key = "g",

@@ -477,7 +477,12 @@ function M.open(ui)
 
     gtk.GLib.idle_add(gtk.GLib.PRIORITY_DEFAULT_IDLE, function()
       ui:navigate(ui.addr or info.entry, { replace = true })
-      ui:status("ctrl+p for commands")
+      ui:status("ctrl+p for commands, ctrl+l for functions, j and k to move")
+
+      -- The listing takes the keyboard, not the filter box in the sidebar --
+      -- otherwise every key typed on opening goes into a search field, which
+      -- is why none of the single-letter commands appeared to work.
+      if ui.listing_view then ui.listing_view.view:grab_focus() end
 
       require("plugins.studio.analysis").start(ui)
       M.drive(ui, os.getenv("DDD_DRIVE"))

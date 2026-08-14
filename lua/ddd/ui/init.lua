@@ -29,7 +29,11 @@ M.limits = {
   inline_xrefs = 6,  -- at a block label, in the listing
   rows = 300,        -- in a list: references, occurrences, data items
   functions = 3000,  -- in the function list, which is filtered instead
-  gap_bytes = 512,   -- of a hexdump between functions
+  -- Of a hexdump between functions. A backstop against a pathological image
+  -- rather than a display decision: a data region is shown whole, because
+  -- marking bytes as code is done by looking at them and anything not on the
+  -- page cannot be clicked.
+  gap_bytes = 256 * 1024,
 }
 
 local function replace_named(list, spec)
