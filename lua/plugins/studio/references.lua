@@ -15,7 +15,7 @@
 local gtk = require "plugins.studio.gtk"
 local ddd = require "ddd"
 
-local Gtk, Gdk = gtk.Gtk, gtk.Gdk
+local Gtk = gtk.Gtk
 
 local M = {}
 
@@ -59,18 +59,12 @@ function M.open(ui, options)
 
   local rows, heading = rows_for(ui, options)
 
-  local window = Gtk.Window {
-    transient_for = ui.window,
-    modal = true,
-    title = heading,
-    default_width = 560,
-    default_height = 360,
-  }
-  window:add_css_class("ddd")
+  -- Forward-declared: the list's activation closure closes the window, and
+  -- the window's key handling acts on the list, so each needs the other
+  -- before either is finished being built.
+  local window, list
 
-  local label = gtk.label(heading, { "ddd-title" })
-
-  local list = gtk.list(function(item)
+  list = gtk.list(function(item)
     window:close()
     if item.addr then ui:navigate(item.addr) end
   end)
@@ -89,23 +83,27 @@ function M.open(ui, options)
   end
   list:select(1)
 
-  local keys = Gtk.EventControllerKey()
-  keys.on_key_pressed = function(_, keyval)
-    local name = Gdk.keyval_name(keyval)
-    if name == "Escape" or name == "x" or name == "q" then
-      window:close()
-      return true
-    end
-    if name == "Return" or name == "KP_Enter" then
-      local selected = list.widget:get_selected_row()
-      local item = selected and list.items[selected:get_index() + 1]
-      window:close()
-      if item and item.addr then ui:navigate(item.addr) end
-      return true
-    end
-    return false
-  end
-  window:add_controller(keys)
+  window = gtk.modal(ui.window, {
+    title = heading,
+    width = 560,
+    height = 360,
+    on_key = function(name)
+      if name == "x" or name == "q" then
+        window:close()
+        return true
+      end
+      if name == "Return" or name == "KP_Enter" then
+        local selected = list.widget:get_selected_row()
+        local item = selected and list.items[selected:get_index() + 1]
+        window:close()
+        if item and item.addr then ui:navigate(item.addr) end
+        return true
+      end
+      return false
+    end,
+  })
+
+  local label = gtk.label(heading, { "ddd-title" })
 
   local box = gtk.box(Gtk.Orientation.VERTICAL)
   box:append(label)

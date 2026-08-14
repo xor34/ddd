@@ -49,84 +49,41 @@ end
 -- ---- the command palette -------------------------------------------------
 
 local function palette(ui)
-  local window = Gtk.Window {
-    transient_for = ui.window,
-    modal = true,
-    decorated = false,
-    default_width = 520,
-    default_height = 380,
-  }
-  window:add_css_class("ddd")
-
-  local search = Gtk.SearchEntry { placeholder_text = "Command" }
-  search.margin_top = 8
-  search.margin_bottom = 8
-  search.margin_start = 8
-  search.margin_end = 8
-
   local commands = ui:commands_available()
-  local list
 
-  local function run(item)
-    window:close()
-    ui:run(item.name)
-  end
+  -- Up and down belong to the list even while the entry has the focus, which
+  -- is the whole ergonomics of a palette -- gtk.picker gives it that for free.
+  gtk.picker(ui.window, {
+    decorated = false,
+    width = 520,
+    height = 380,
+    placeholder = "Command",
+    count = false,
 
-  list = gtk.list(run)
-
-  local function fill(pattern)
-    list:clear()
-    pattern = (pattern or ""):lower()
-
-    for _, command in ipairs(commands) do
-      local title = command.title or command.name
-      if pattern == "" or title:lower():find(pattern, 1, true)
-         or command.name:lower():find(pattern, 1, true) then
-        local shortcut = command.key and
-          (" <span foreground='%s'>%s</span>"):format(ui.theme.colour.muted,
-                                                      ddd.format.escape(command.key))
-          or ""
-        list:add(ddd.format.escape(title) .. shortcut, command)
+    items = function(pattern)
+      pattern = (pattern or ""):lower()
+      local found = {}
+      for _, command in ipairs(commands) do
+        local title = command.title or command.name
+        if pattern == "" or title:lower():find(pattern, 1, true)
+           or command.name:lower():find(pattern, 1, true) then
+          found[#found + 1] = command
+        end
       end
-    end
-    list:select(1)
-  end
+      return found
+    end,
 
-  search.on_search_changed = function() fill(search.text) end
-  search.on_activate = function()
-    local row = list.widget:get_selected_row()
-    local item = row and list.items[row:get_index() + 1] or list.items[1]
-    if item then run(item) end
-  end
+    row = function(command)
+      local title = command.title or command.name
+      local shortcut = command.key and
+        (" <span foreground='%s'>%s</span>"):format(ui.theme.colour.muted,
+                                                    ddd.format.escape(command.key))
+        or ""
+      return ddd.format.escape(title) .. shortcut
+    end,
 
-  local keys = Gtk.EventControllerKey()
-  keys.on_key_pressed = function(_, keyval, _, state)
-    local name = Gdk.keyval_name(keyval)
-    if name == "Escape" then
-      window:close()
-      return true
-    end
-    -- Up and down belong to the list even while the entry has the focus, which
-    -- is the whole ergonomics of a palette.
-    if name == "Down" or name == "Up" then
-      local row = list.widget:get_selected_row()
-      local index = row and row:get_index() or -1
-      local next_row = list.widget:get_row_at_index(index + (name == "Down" and 1 or -1))
-      if next_row then list.widget:select_row(next_row) end
-      return true
-    end
-    return false
-  end
-  window:add_controller(keys)
-
-  local box = gtk.box(Gtk.Orientation.VERTICAL)
-  box:append(search)
-  box:append(gtk.scrolled(list.widget))
-  window:set_child(box)
-
-  fill()
-  window:present()
-  search:grab_focus()
+    on_activate = function(item) ui:run(item.name) end,
+  })
 end
 
 -- ---- the window ----------------------------------------------------------

@@ -1,4 +1,5 @@
 #include "elf.h"
+#include "endian.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -13,8 +14,6 @@ constexpr uint16_t ET_REL = 1;
 constexpr uint32_t PT_LOAD = 1;
 constexpr uint32_t PF_X = 1;
 
-constexpr uint32_t SHT_REL = 9;
-constexpr uint32_t SHT_RELA = 4;
 constexpr uint32_t SHT_SYMTAB = 2;
 constexpr uint32_t SHT_DYNSYM = 11;
 constexpr uint64_t SHF_ALLOC = 2;
@@ -38,13 +37,7 @@ public:
       return 0;
     }
 
-    uint64_t value = 0;
-    if (big_endian_) {
-      for (unsigned i = 0; i < size; ++i) value = (value << 8) | bytes_[offset + i];
-    } else {
-      for (unsigned i = size; i-- > 0;) value = (value << 8) | bytes_[offset + i];
-    }
-    return value;
+    return read_endian(bytes_.data() + offset, size, big_endian_);
   }
 
   // A NUL-terminated name out of a string table.
@@ -247,7 +240,6 @@ void read_plt(Reader &reader, ElfInfo &info, const std::vector<Section> &section
     ElfRange extent;
     extent.begin = stub;
     extent.end = stub + stub_size;
-    extent.name = name + "@plt";
     extent.executable = true;
 
     const std::string readable = demangle(name) + "@plt";

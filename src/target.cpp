@@ -1,4 +1,5 @@
 #include "target.h"
+#include "text.h"
 
 #include "error.hh"
 #include "globalcontext.hh"
@@ -10,22 +11,6 @@
 
 namespace ddd {
 namespace {
-
-bool parse_number(const std::string &text, uint64_t &out) {
-  if (text.empty())
-    return false;
-  try {
-    size_t consumed = 0;
-    int base = (text.size() > 2 && text[0] == '0' &&
-                (text[1] == 'x' || text[1] == 'X'))
-                   ? 16
-                   : 10;
-    out = std::stoull(text, &consumed, base);
-    return consumed == text.size();
-  } catch (...) {
-    return false;
-  }
-}
 
 bool ends_with(const std::string &text, const std::string &suffix) {
   return text.size() >= suffix.size() &&
@@ -51,7 +36,7 @@ struct TargetSet::Instance {
 };
 
 TargetSet::TargetSet(const Image &image)
-    : image_(image), loader_(std::make_unique<ImageLoader>(image)) {}
+    : loader_(std::make_unique<ImageLoader>(image)) {}
 
 TargetSet::~TargetSet() = default;
 

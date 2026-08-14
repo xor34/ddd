@@ -18,7 +18,6 @@
 // the operand that refers back to the phi itself makes it trivial.
 #include "../pass.h"
 
-#include <algorithm>
 #include <ostream>
 
 namespace ddd {
@@ -32,29 +31,16 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
-    int removed = 0;
-
-    for (bool changed = true; changed;) {
-      changed = false;
-
-      for (SsaBlock &block : fn.blocks()) {
-        for (SsaOp *phi : block.phis) {
+    const int removed = remove_ops_to_fixpoint(
+        fn,
+        [&](SsaOp *phi) {
           SsaValue *replacement = trivial_result(*phi);
-          if (replacement == nullptr) continue;
+          if (replacement == nullptr) return false;
 
           replace_uses(fn, *phi->out, *replacement);
-          phi->out = nullptr; // marks it for removal below
-          ++removed;
-          changed = true;
-        }
-
-        auto dead = std::remove_if(block.phis.begin(), block.phis.end(),
-                                   [](const SsaOp *phi) { return phi->out == nullptr; });
-        block.phis.erase(dead, block.phis.end());
-      }
-
-      if (changed) fn.rebuild_uses();
-    }
+          return true;
+        },
+        {&SsaBlock::phis});
 
     if (ctx.verbose) ctx.stream() << "  removed " << removed << " trivial phi(s)\n";
   }

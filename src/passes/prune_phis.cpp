@@ -11,7 +11,6 @@
 #include "../pass.h"
 #include "../reaching.h"
 
-#include <algorithm>
 #include <ostream>
 #include <set>
 
@@ -31,28 +30,14 @@ public:
     // the same way; without it, deleting the phi makes everything feeding it
     // dead too, and the function empties out.
     const std::set<int> roots = observable_values(fn, ctx);
-    int removed = 0;
 
-    for (bool changed = true; changed;) {
-      changed = false;
-
-      for (SsaBlock &block : fn.blocks()) {
-        auto dead = std::remove_if(
-            block.phis.begin(), block.phis.end(), [&roots](const SsaOp *phi) {
-              return phi->out != nullptr && phi->out->uses.empty() &&
-                     roots.count(phi->out->id) == 0;
-            });
-        if (dead == block.phis.end())
-          continue;
-
-        removed += static_cast<int>(std::distance(dead, block.phis.end()));
-        block.phis.erase(dead, block.phis.end());
-        changed = true;
-      }
-
-      if (changed)
-        fn.rebuild_uses();
-    }
+    const int removed = remove_ops_to_fixpoint(
+        fn,
+        [&roots](const SsaOp *phi) {
+          return phi->out != nullptr && phi->out->uses.empty() &&
+                 roots.count(phi->out->id) == 0;
+        },
+        {&SsaBlock::phis});
 
     if (ctx.verbose)
       ctx.stream() << "  removed " << removed << " dead phi(s)\n";

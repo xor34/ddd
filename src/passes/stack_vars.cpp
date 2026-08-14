@@ -102,13 +102,8 @@ SparseAnalysis<StackValue> build_analysis(const Storage &stack_pointer) {
       return StackValue::bottom();
     // Stack offsets arrive as unsigned constants that are really negative in
     // the pointer's width, so sign-extend before doing arithmetic with them.
-    int64_t value = static_cast<int64_t>(vn.offset);
-    if (vn.size > 0 && vn.size < 8) {
-      uint64_t sign = uint64_t(1) << (vn.size * 8 - 1);
-      uint64_t mask = (uint64_t(1) << (vn.size * 8)) - 1;
-      uint64_t bits = vn.offset & mask;
-      value = static_cast<int64_t>((bits & sign) ? (bits | ~mask) : bits);
-    }
+    const int64_t value = static_cast<int64_t>(
+        sign_extend(vn.offset, static_cast<uint32_t>(vn.size)));
     return StackValue::number(value);
   };
 
@@ -276,7 +271,7 @@ private:
       if (stored == nullptr || !stored->is_live_in()) return;
       if (preserved.count(stored->storage) == 0) return;
 
-      saved[address.value] = "saved_" + register_name(ctx, *stored);
+      saved[address.value] = "saved_" + ctx.base_name_of(*stored);
     });
   }
 
@@ -292,12 +287,6 @@ private:
       value = def->ins[0].value;
     }
     return value;
-  }
-
-  static std::string register_name(const PassContext &ctx, const SsaValue &value) {
-    const std::string full = ctx.name_of(value);
-    const size_t hash = full.rfind('#');
-    return hash == std::string::npos ? full : full.substr(0, hash);
   }
 
   static void report(const SsaFunction &fn, PassContext &ctx,

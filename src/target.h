@@ -58,7 +58,6 @@ private:
   Instance *instance_for(const std::string &spec,
                          const std::vector<std::string> &context);
 
-  const Image &image_;
   std::unique_ptr<ImageLoader> loader_;
   std::vector<std::unique_ptr<Instance>> instances_;
   std::deque<Target> targets_;

@@ -123,6 +123,8 @@ void LuaEnv::add_path(const std::string &root) {
   lua_getglobal(state_, "package");
 
   lua_getfield(state_, -1, "path");
+  if (!lua_isstring(state_, -1))
+    luaL_error(state_, "package.path is not a string");
   const std::string existing = lua_tostring(state_, -1);
   lua_pop(state_, 1);
 

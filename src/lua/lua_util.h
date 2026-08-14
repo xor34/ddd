@@ -74,6 +74,25 @@ inline void set_boolean(lua_State *L, const char *key, bool value) {
   lua_setfield(L, -2, key);
 }
 
+// Pushes `*value`, or nil if there is no such string -- which all over this
+// binding layer means "nobody has said one", not an error.
+inline void push_optional_string(lua_State *L, const std::string *value) {
+  if (value == nullptr)
+    lua_pushnil(L);
+  else
+    lua_pushlstring(L, value->data(), value->size());
+}
+
+// Pushes `address`, or nil for the zero that a Session method uses to mean
+// "nothing there" -- 0 is never a real address in these calls, since it would
+// be inside the ELF header.
+inline void push_address_or_nil(lua_State *L, uint64_t address) {
+  if (address == 0)
+    lua_pushnil(L);
+  else
+    lua_pushinteger(L, static_cast<lua_Integer>(address));
+}
+
 // An address argument, which is a plain integer everywhere in this interface.
 inline uint64_t check_address(lua_State *L, int index) {
   return static_cast<uint64_t>(luaL_checkinteger(L, index));
@@ -90,6 +109,34 @@ inline std::string opt_string(lua_State *L, int index,
   if (lua_isnoneornil(L, index))
     return fallback;
   return check_string(L, index);
+}
+
+// ---- iterating ------------------------------------------------------------
+//
+// A stateful Lua iterator over indices 0..count-1 of an object sitting in
+// upvalue 1, with upvalue 2 the next index to hand out. Instantiating this
+// template *is* the iterator function -- `Fetch` gets the object back (a
+// check_* / to_* function), `Count` says how many items it has, and `Push`
+// puts the next one on the stack. Used for the `fn:values()` / `fn:blocks()`
+// / `value:uses()` family, whose bodies would otherwise differ only in those
+// three things.
+//
+// Not every iterator fits this shape: one that yields two values per step, or
+// that walks something nested (blocks, then ops within a block), needs its
+// own hand-rolled closure and is left as one.
+template <typename Object, Object *(*Fetch)(lua_State *, int),
+         int (*Count)(Object &), void (*Push)(lua_State *, Object &, int)>
+int iterate(lua_State *L) {
+  Object *object = Fetch(L, lua_upvalueindex(1));
+  const int next = static_cast<int>(lua_tointeger(L, lua_upvalueindex(2)));
+
+  if (next >= Count(*object))
+    return 0;
+
+  lua_pushinteger(L, next + 1);
+  lua_replace(L, lua_upvalueindex(2));
+  Push(L, *object, next);
+  return 1;
 }
 
 // ---- the bound types ----------------------------------------------------

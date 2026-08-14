@@ -243,7 +243,7 @@ private:
     auto slot_of = [&](const SsaOperand &address) -> const std::string * {
       if (!address.is_tracked()) return nullptr;
       const std::string &label = ctx.annotations->label(*address.value);
-      if (label.size() < 2 || label[0] != '&') return nullptr;
+      if (!is_slot_label(label)) return nullptr;
       return &label;
     };
 
@@ -281,7 +281,7 @@ private:
       if (!ctx.annotations->has_display_name(value)) continue;
 
       std::string shown = ctx.annotations->display_name(value);
-      if (shown.size() > 1 && shown[0] == '&') shown.erase(0, 1);
+      if (is_slot_label(shown)) shown.erase(0, 1);
 
       // The slot's type is the type of what is stored in it, which the
       // pointer evidence on its address already records.
@@ -290,7 +290,7 @@ private:
       Evidence effective = evidence;
 
       // For a slot, the type wanted is that of its *contents*, gathered above.
-      if (ctx.annotations->display_name(value)[0] == '&') {
+      if (is_slot_label(ctx.annotations->display_name(value))) {
         auto contents = slots_.find(shown);
         effective = contents != slots_.end() ? contents->second : Evidence{};
         size = evidence.pointee != 0 ? evidence.pointee : size;

@@ -1,4 +1,5 @@
 #include "image.h"
+#include "endian.h"
 
 #include <cctype>
 
@@ -8,16 +9,7 @@ std::optional<uint64_t> Image::read_int(uint64_t addr, unsigned size) const {
   if (size == 0 || size > 8 || !contains(addr, size))
     return std::nullopt;
 
-  const uint8_t *bytes = at(addr);
-  uint64_t value = 0;
-  if (big_endian_) {
-    for (unsigned i = 0; i < size; ++i)
-      value = (value << 8) | bytes[i];
-  } else {
-    for (unsigned i = size; i-- > 0;)
-      value = (value << 8) | bytes[i];
-  }
-  return value;
+  return read_endian(at(addr), size, big_endian_);
 }
 
 std::optional<std::string> Image::read_string(uint64_t addr,

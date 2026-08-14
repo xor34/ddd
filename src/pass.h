@@ -12,8 +12,10 @@
 #include "ssa.h"
 #include "target.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <iosfwd>
 #include <map>
 #include <memory>
@@ -67,6 +69,10 @@ struct PassContext {
   // Operand by position, so the address-space constant of a LOAD/STORE comes
   // out as a space name rather than an encoded pointer.
   std::string name_of(const SsaOp &op, size_t index) const;
+  // name_of() without the trailing "#<version>" -- for contexts (a register
+  // written only once in the function, a note about where a value lives)
+  // where the version would be noise rather than information.
+  std::string base_name_of(const SsaValue &value) const;
 };
 
 class Pass {
@@ -115,6 +121,45 @@ template <typename T> struct PassRegistrar {
 // A pass that shells out to an external script (see passes/script_pass.cpp).
 // Named by path at the point of use, so it is not in the registry.
 std::unique_ptr<Pass> make_script_pass(const std::string &path);
+
+// The "remove to a fixed point" shape shared by dce, prune-phis and simplify:
+// sweep the chosen vector(s) of every block with `is_dead`, and repeat for as
+// long as a round removes something, since deleting one op can be exactly
+// what makes another dead (it fed it, or it was its last remaining use). SSA
+// use lists are rebuilt after every round that changed anything, because a
+// later round's predicate may depend on them.
+//
+// `is_dead` may mutate -- simplify decides an operand is dead by rewriting
+// its uses first and returning true -- std::remove_if visits every element
+// exactly once per round, so that is a well-defined place to do it.
+//
+// Defaults to sweeping both phis and ops, as dce needs; pass an explicit
+// single-element list (e.g. {&SsaBlock::phis}) to sweep only one.
+template <typename Predicate>
+int remove_ops_to_fixpoint(
+    SsaFunction &fn, Predicate &&is_dead,
+    std::initializer_list<std::vector<SsaOp *> SsaBlock::*> selectors = {
+        &SsaBlock::phis, &SsaBlock::ops}) {
+  int removed = 0;
+  for (bool changed = true; changed;) {
+    changed = false;
+
+    for (SsaBlock &block : fn.blocks()) {
+      for (auto member : selectors) {
+        std::vector<SsaOp *> &ops = block.*member;
+        auto dead = std::remove_if(ops.begin(), ops.end(), is_dead);
+        if (dead == ops.end()) continue;
+
+        removed += static_cast<int>(std::distance(dead, ops.end()));
+        ops.erase(dead, ops.end());
+        changed = true;
+      }
+    }
+
+    if (changed) fn.rebuild_uses();
+  }
+  return removed;
+}
 
 // Runs a sequence of passes in order.
 class PassManager {

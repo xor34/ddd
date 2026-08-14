@@ -8,6 +8,7 @@
 #include "../extract.h"
 
 #include <cmath>
+#include <cstring>
 #include <ostream>
 #include <sstream>
 
@@ -64,7 +65,7 @@ public:
 
       std::ostringstream detail;
       detail << "mean " << (run_total / run_windows) << " bits/byte";
-      if (std::string(run_kind) == "high-entropy")
+      if (strcmp(run_kind, "high-entropy") == 0)
         detail << " -- compressed or encrypted";
       else
         detail << " -- padding or sparse data";
@@ -84,7 +85,7 @@ public:
       const char *kind = classify(bits);
 
       if (kind == nullptr ||
-          (run_kind != nullptr && std::string(kind) != run_kind)) {
+          (run_kind != nullptr && strcmp(kind, run_kind) != 0)) {
         flush(addr);
       }
       if (kind == nullptr)

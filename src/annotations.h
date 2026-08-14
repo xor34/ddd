@@ -24,6 +24,14 @@
 
 namespace ddd {
 
+// stack-vars' convention for "this label names the address of a frame slot,
+// not the slot itself": a leading '&' before the slot's name (`&var_18`).
+// Everything that reads labels needs to agree on the spelling, so it is
+// checked in exactly one place rather than reimplemented at each call site.
+inline bool is_slot_label(const std::string &label) {
+  return label.size() > 1 && label[0] == '&';
+}
+
 class Annotations {
 public:
   void comment(const SsaOp &op, std::string text);

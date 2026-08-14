@@ -98,7 +98,7 @@ std::string hex(uint64_t value) {
 // worth showing at all.
 const std::string *slot_name(ExprRef expr) {
   if (expr == nullptr || expr->kind != ExprKind::Variable) return nullptr;
-  if (expr->text.size() < 2 || expr->text[0] != '&') return nullptr;
+  if (!is_slot_label(expr->text)) return nullptr;
   return &expr->text;
 }
 
@@ -229,13 +229,10 @@ private:
       return known->second;
     }
 
-    const std::string full = ctx_.name_of(value);
-
     auto it = versions_.find(value.storage);
-    if (it == versions_.end() || it->second != 1) return full;
+    if (it == versions_.end() || it->second != 1) return ctx_.name_of(value);
 
-    const size_t hash = full.rfind('#');
-    return hash == std::string::npos ? full : full.substr(0, hash);
+    return ctx_.base_name_of(value);
   }
 
   bool hides_machine_state() const { return !ctx_.show_machine_state; }
@@ -255,7 +252,7 @@ private:
     if (ctx_.show_machine_state) return false;
 
     const std::string &label = ctx_.annotations->label(*op.out);
-    return label.size() > 1 && label[0] == '&';
+    return is_slot_label(label);
   }
 
   // Bookkeeping the machine does that the program did not ask for: keeping the

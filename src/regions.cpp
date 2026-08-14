@@ -140,6 +140,10 @@ void RegionTree::resize(int id, uint64_t size) {
 
   for (int child : orphaned) {
     detach(child);
+    // The detached child's own descendants would otherwise keep pointing at
+    // a dead parent and never get marked dead themselves, so recurse through
+    // the subtree the same way clear_children() does.
+    clear_children(child);
     dead_[child] = true;
   }
 }

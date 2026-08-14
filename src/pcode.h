@@ -99,6 +99,28 @@ inline bool is_temporary(const Storage &storage) {
          storage.space->getType() == ghidra::IPTR_INTERNAL;
 }
 
+// The bits an integer of `size` bytes occupies, for masking a wider (64-bit)
+// container down to it. size 0 or size >= 8 keeps everything -- there is
+// nothing narrower to mask to.
+inline uint64_t mask_for(uint32_t size) {
+  return size >= 8 ? ~uint64_t(0) : (uint64_t(1) << (size * 8)) - 1;
+}
+
+// Reinterprets the low `from_size` bytes of `value` as a two's-complement
+// signed integer of that width, sign-extended out to 64 bits. p-code hands
+// values around as unsigned constants regardless of how the operation that
+// produced them meant them, so anything that needs the signed reading --
+// constant folding, a stack offset that is really negative -- goes through
+// this rather than trusting the machine width of the surrounding uint64_t.
+inline uint64_t sign_extend(uint64_t value, uint32_t from_size) {
+  if (from_size == 0 || from_size >= 8)
+    return value;
+  const uint64_t sign_bit = uint64_t(1) << (from_size * 8 - 1);
+  const uint64_t mask = mask_for(from_size);
+  value &= mask;
+  return (value & sign_bit) ? (value | ~mask) : value;
+}
+
 // Does this op end a basic block?
 bool is_terminator(OpCode opc);
 

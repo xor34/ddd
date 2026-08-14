@@ -144,24 +144,20 @@ void push_operand(lua_State *L, const SsaOp &op, size_t index) {
 
 // ---- SsaValue -----------------------------------------------------------
 
-int value_uses_iterator(lua_State *L) {
-  SsaValue *value = check_value(L, lua_upvalueindex(1));
-  const int next = static_cast<int>(lua_tointeger(L, lua_upvalueindex(2)));
+int value_uses_count(SsaValue &value) {
+  return static_cast<int>(value.uses.size());
+}
 
-  if (next >= static_cast<int>(value->uses.size()))
-    return 0;
-
-  lua_pushinteger(L, next + 1);
-  lua_replace(L, lua_upvalueindex(2));
-  push_op(L, value->uses[next]);
-  return 1;
+void push_use(lua_State *L, SsaValue &value, int index) {
+  push_op(L, value.uses[static_cast<size_t>(index)]);
 }
 
 int value_uses(lua_State *L) {
   check_value(L, 1);
   lua_pushvalue(L, 1);
   lua_pushinteger(L, 0);
-  lua_pushcclosure(L, value_uses_iterator, 2);
+  lua_pushcclosure(
+      L, iterate<SsaValue, check_value, value_uses_count, push_use>, 2);
   return 1;
 }
 
@@ -215,6 +211,9 @@ int op_input(lua_State *L) {
   return 1;
 }
 
+// Not the generic `iterate` template: an operand iterator hands back the
+// index *and* the operand table, two values, where the template only ever
+// pushes one.
 int op_inputs_iterator(lua_State *L) {
   SsaOp *op = check_op(L, lua_upvalueindex(1));
   const size_t next = static_cast<size_t>(lua_tointeger(L, lua_upvalueindex(2)));
@@ -309,6 +308,10 @@ int function_value(lua_State *L) {
 
 // Every op of the function, phis first within each block, in block order --
 // the same order for_each_op visits them in.
+//
+// Not the generic `iterate` template: this one walks two levels (block, then
+// phi-or-op within it) and carries three upvalues, not the template's "one
+// object, one index."
 int function_ops_iterator(lua_State *L) {
   SsaFunction *fn = to_function(L, lua_upvalueindex(1));
   int block = static_cast<int>(lua_tointeger(L, lua_upvalueindex(2)));
@@ -347,24 +350,20 @@ int function_ops(lua_State *L) {
   return 1;
 }
 
-int function_values_iterator(lua_State *L) {
-  SsaFunction *fn = to_function(L, lua_upvalueindex(1));
-  const int next = static_cast<int>(lua_tointeger(L, lua_upvalueindex(2)));
+int function_value_count(SsaFunction &fn) { return fn.value_count(); }
 
-  if (next >= fn->value_count())
-    return 0;
-
-  lua_pushinteger(L, next + 1);
-  lua_replace(L, lua_upvalueindex(2));
-  push_value(L, &fn->value(next));
-  return 1;
+void push_function_value(lua_State *L, SsaFunction &fn, int index) {
+  push_value(L, &fn.value(index));
 }
 
 int function_values(lua_State *L) {
   to_function(L, 1);
   lua_pushvalue(L, 1);
   lua_pushinteger(L, 0);
-  lua_pushcclosure(L, function_values_iterator, 2);
+  lua_pushcclosure(L,
+                   iterate<SsaFunction, to_function, function_value_count,
+                           push_function_value>,
+                   2);
   return 1;
 }
 
@@ -419,24 +418,20 @@ int function_block(lua_State *L) {
   return 1;
 }
 
-int function_blocks_iterator(lua_State *L) {
-  SsaFunction *fn = to_function(L, lua_upvalueindex(1));
-  const int next = static_cast<int>(lua_tointeger(L, lua_upvalueindex(2)));
+int function_block_count(SsaFunction &fn) { return fn.size(); }
 
-  if (next >= fn->size())
-    return 0;
-
-  lua_pushinteger(L, next + 1);
-  lua_replace(L, lua_upvalueindex(2));
-  push_block(L, *fn, next);
-  return 1;
+void push_function_block(lua_State *L, SsaFunction &fn, int index) {
+  push_block(L, fn, index);
 }
 
 int function_blocks(lua_State *L) {
   to_function(L, 1);
   lua_pushvalue(L, 1);
   lua_pushinteger(L, 0);
-  lua_pushcclosure(L, function_blocks_iterator, 2);
+  lua_pushcclosure(L,
+                   iterate<SsaFunction, to_function, function_block_count,
+                           push_function_block>,
+                   2);
   return 1;
 }
 
@@ -638,10 +633,7 @@ int context_symbol(lua_State *L) {
     return 1;
   }
   auto it = ctx->symbols->find(check_address(L, 2));
-  if (it == ctx->symbols->end())
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, it->second.data(), it->second.size());
+  push_optional_string(L, it == ctx->symbols->end() ? nullptr : &it->second);
   return 1;
 }
 
@@ -667,10 +659,7 @@ int context_read_string(lua_State *L) {
     return 1;
   }
   std::optional<std::string> text = ctx->image->read_string(check_address(L, 2));
-  if (!text)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, text->data(), text->size());
+  push_optional_string(L, text ? &*text : nullptr);
   return 1;
 }
 
@@ -703,12 +692,8 @@ int context_user_name(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  const std::string *chosen =
-      ctx->project->variable_name(check_address(L, 2), check_string(L, 3));
-  if (chosen == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, chosen->data(), chosen->size());
+  push_optional_string(
+      L, ctx->project->variable_name(check_address(L, 2), check_string(L, 3)));
   return 1;
 }
 
@@ -718,11 +703,7 @@ int context_user_function_name(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  const std::string *chosen = ctx->project->function_name(check_address(L, 2));
-  if (chosen == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, chosen->data(), chosen->size());
+  push_optional_string(L, ctx->project->function_name(check_address(L, 2)));
   return 1;
 }
 
@@ -732,11 +713,7 @@ int context_user_comment(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  const std::string *text = ctx->project->comment(check_address(L, 2));
-  if (text == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, text->data(), text->size());
+  push_optional_string(L, ctx->project->comment(check_address(L, 2)));
   return 1;
 }
 
@@ -748,11 +725,7 @@ int context_user_signature(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  const std::string *text = ctx->project->signature(check_address(L, 2));
-  if (text == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, text->data(), text->size());
+  push_optional_string(L, ctx->project->signature(check_address(L, 2)));
   return 1;
 }
 
@@ -762,12 +735,8 @@ int context_user_type(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  const std::string *type =
-      ctx->project->type(check_address(L, 2), check_string(L, 3));
-  if (type == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, type->data(), type->size());
+  push_optional_string(
+      L, ctx->project->type(check_address(L, 2), check_string(L, 3)));
   return 1;
 }
 

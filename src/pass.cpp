@@ -82,6 +82,12 @@ std::string PassContext::name_of(const SsaOperand &operand) const {
   return name_of(operand.raw);
 }
 
+std::string PassContext::base_name_of(const SsaValue &value) const {
+  const std::string full = name_of(value);
+  const size_t hash = full.rfind('#');
+  return hash == std::string::npos ? full : full.substr(0, hash);
+}
+
 std::string PassContext::name_of(const SsaOp &op, size_t index) const {
   const SsaOperand &operand = op.ins[index];
 

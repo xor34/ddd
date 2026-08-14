@@ -36,19 +36,6 @@ Const meet(const Const &a, const Const &b) {
   return a.value == b.value ? a : Const::bottom();
 }
 
-uint64_t mask_for(uint32_t size) {
-  return size >= 8 ? ~uint64_t(0) : (uint64_t(1) << (size * 8)) - 1;
-}
-
-uint64_t sign_extend(uint64_t value, uint32_t from_size) {
-  if (from_size == 0 || from_size >= 8)
-    return value;
-  uint64_t sign_bit = uint64_t(1) << (from_size * 8 - 1);
-  uint64_t m = mask_for(from_size);
-  value &= m;
-  return (value & sign_bit) ? (value | ~m) : value;
-}
-
 // Byte width of an input, whether it was renamed or left raw.
 uint32_t operand_size(const SsaOp &op, size_t i) {
   if (i >= op.ins.size())

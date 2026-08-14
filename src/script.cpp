@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <sys/wait.h>
+#include <poll.h>
 #include <unistd.h>
 
 namespace ddd {
@@ -77,25 +78,75 @@ ScriptResult run_script(const std::vector<std::string> &command,
   ignore.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &ignore, &previous);
 
+  // Interleave writing stdin with draining stdout: a script that echoes as it
+  // reads can fill the stdout pipe buffer before we finish writing, and with
+  // both ends unbuffered that is a deadlock (we block writing while it blocks
+  // writing to us) unless something keeps reading in the meantime.
   size_t written = 0;
-  while (written < input.size()) {
-    ssize_t n =
-        write(to_child[1], input.data() + written, input.size() - written);
-    if (n <= 0)
-      break;
-    written += static_cast<size_t>(n);
-  }
-  close(to_child[1]);
-
+  bool stdin_open = true;
+  bool stdout_open = true;
   std::vector<uint8_t> buffer(kChunk);
-  while (true) {
-    ssize_t n = read(from_child[0], buffer.data(), buffer.size());
-    if (n <= 0)
+
+  while (stdin_open || stdout_open) {
+    struct pollfd fds[2];
+    int nfds = 0;
+    int stdin_slot = -1, stdout_slot = -1;
+
+    if (stdin_open) {
+      stdin_slot = nfds;
+      fds[nfds].fd = to_child[1];
+      fds[nfds].events = POLLOUT;
+      fds[nfds].revents = 0;
+      ++nfds;
+    }
+    if (stdout_open) {
+      stdout_slot = nfds;
+      fds[nfds].fd = from_child[0];
+      fds[nfds].events = POLLIN;
+      fds[nfds].revents = 0;
+      ++nfds;
+    }
+
+    if (poll(fds, static_cast<nfds_t>(nfds), -1) < 0) {
+      if (errno == EINTR)
+        continue;
       break;
-    result.output.insert(result.output.end(), buffer.begin(),
-                         buffer.begin() + n);
+    }
+
+    if (stdout_slot >= 0 &&
+        (fds[stdout_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
+      ssize_t n = read(from_child[0], buffer.data(), buffer.size());
+      if (n > 0) {
+        result.output.insert(result.output.end(), buffer.begin(),
+                             buffer.begin() + n);
+      } else {
+        close(from_child[0]);
+        stdout_open = false;
+      }
+    }
+
+    if (stdin_slot >= 0 && (fds[stdin_slot].revents & (POLLOUT | POLLERR))) {
+      if (written < input.size()) {
+        ssize_t n = write(to_child[1], input.data() + written,
+                          input.size() - written);
+        if (n > 0) {
+          written += static_cast<size_t>(n);
+        } else if (n < 0 && errno != EAGAIN && errno != EINTR) {
+          close(to_child[1]);
+          stdin_open = false;
+        }
+      }
+      if (stdin_open && written >= input.size()) {
+        close(to_child[1]);
+        stdin_open = false;
+      }
+    }
   }
-  close(from_child[0]);
+
+  if (stdin_open)
+    close(to_child[1]);
+  if (stdout_open)
+    close(from_child[0]);
 
   int status = 0;
   waitpid(pid, &status, 0);

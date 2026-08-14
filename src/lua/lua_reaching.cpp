@@ -53,15 +53,24 @@ int reaching_gc(lua_State *L) {
   return 0;
 }
 
+// The register-name argument every method here takes last, resolved to
+// storage. Pushes nil and returns false for one that names nothing -- which
+// none of the callers can answer for -- so a caller just returns on failure.
+bool resolve_storage(lua_State *L, Bound &bound, int index, Storage &storage) {
+  storage = storage_of(L, bound, index);
+  if (storage.space != nullptr)
+    return true;
+  lua_pushnil(L);
+  return false;
+}
+
 int reaching_before(lua_State *L) {
   Bound *bound = check_bound(L, 1);
   SsaOp *op = check_op(L, 2);
 
-  const Storage storage = storage_of(L, *bound, 3);
-  if (storage.space == nullptr) {
-    lua_pushnil(L);
+  Storage storage;
+  if (!resolve_storage(L, *bound, 3, storage))
     return 1;
-  }
 
   push_value(L, bound->values.before(*op, storage));
   return 1;
@@ -71,11 +80,9 @@ int reaching_at_entry(lua_State *L) {
   Bound *bound = check_bound(L, 1);
   const int block = static_cast<int>(luaL_checkinteger(L, 2));
 
-  const Storage storage = storage_of(L, *bound, 3);
-  if (storage.space == nullptr) {
-    lua_pushnil(L);
+  Storage storage;
+  if (!resolve_storage(L, *bound, 3, storage))
     return 1;
-  }
 
   push_value(L, bound->values.at_entry(block, storage));
   return 1;
@@ -85,11 +92,9 @@ int reaching_at_exit(lua_State *L) {
   Bound *bound = check_bound(L, 1);
   const int block = static_cast<int>(luaL_checkinteger(L, 2));
 
-  const Storage storage = storage_of(L, *bound, 3);
-  if (storage.space == nullptr) {
-    lua_pushnil(L);
+  Storage storage;
+  if (!resolve_storage(L, *bound, 3, storage))
     return 1;
-  }
 
   push_value(L, bound->values.at_exit(block, storage));
   return 1;

@@ -17,61 +17,39 @@ local kMaxRows = ddd.ui.limits.functions
 function M.build(ui)
   local self = { ui = ui }
 
-  local search = Gtk.SearchEntry { placeholder_text = "Filter functions" }
-  search:add_css_class("ddd-search")
-  search.margin_top = 6
-  search.margin_bottom = 6
-  search.margin_start = 8
-  search.margin_end = 8
+  local sl = gtk.searchable_list(function(item) ui:navigate(item.addr) end, {
+    placeholder = "Filter functions",
+    noun = "function",
+    limit = kMaxRows,
 
-  local list = gtk.list(function(item) ui:navigate(item.addr) end)
+    items = function(pattern) return ui.session.functions(pattern or "") end,
 
-  local count = gtk.label("", { "ddd-muted", "ddd-mono" })
-  count.margin_start = 10
-  count.margin_bottom = 4
-
-  local function fill(pattern)
-    list:clear()
-
-    local functions = ui.session.functions(pattern or "")
-    local shown = math.min(#functions, kMaxRows)
-
-    for index = 1, shown do
-      local func = functions[index]
-      list:add(("<span foreground='%s'>%08x</span>  %s")
-        :format(ui.theme.token.address, func.addr,
-                ddd.format.escape(func.name)), func)
-    end
-
-    if #functions > shown then
-      count.label = ("%d functions, %d shown"):format(#functions, shown)
-    else
-      count.label = ("%d function%s"):format(#functions, #functions == 1 and "" or "s")
-    end
-  end
-
-  search.on_search_changed = function() fill(search.text) end
+    row = function(func)
+      return ("<span foreground='%s'>%08x</span>  %s")
+        :format(ui.theme.token.address, func.addr, ddd.format.escape(func.name))
+    end,
+  })
 
   local box = gtk.box(Gtk.Orientation.VERTICAL)
-  box:append(search)
-  box:append(gtk.scrolled(list.widget))
-  box:append(count)
+  box:append(sl.search)
+  box:append(gtk.scrolled(sl.list.widget))
+  box:append(sl.count)
 
-  fill()
+  sl.fill()
 
   -- Following a call should move the selection here too, or the list stops
   -- agreeing with the listing about where you are.
   ui:on("navigate", function(_, _, func)
     if not func then return end
-    for index, item in ipairs(list.items) do
+    for index, item in ipairs(sl.list.items) do
       if item.addr == func.addr then
-        list:select(index)
+        sl.list:select(index)
         return
       end
     end
   end)
 
-  ui:on("invalidate", function() fill(search.text) end)
+  ui:on("invalidate", function() sl.fill(sl.search.text) end)
 
   self.widget = box
   return self

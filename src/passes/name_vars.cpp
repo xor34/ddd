@@ -125,8 +125,8 @@ private:
     // only ever one of them, and calling it anything else would be worse.
     candidate.from_storage = !ctx.annotations->has_label(value) &&
                              !value.is_live_in() &&
-                             candidate.name == base_name(value, ctx);
-    candidate.storage = base_name(value, ctx);
+                             candidate.name == ctx.base_name_of(value);
+    candidate.storage = ctx.base_name_of(value);
 
     ++bases_[candidate.name];
     candidates_.push_back(std::move(candidate));
@@ -157,8 +157,7 @@ private:
         // address recomputed at every access, and those are all the one
         // variable -- giving them separate names would invent variables the
         // program does not have.
-        const bool is_slot_address = name.size() > 1 && name[0] == '&';
-        if (!is_slot_address) name = unique(name);
+        if (!is_slot_label(name)) name = unique(name);
       }
 
       ctx.annotations->set_display_name(*candidate.value, name);
@@ -204,7 +203,7 @@ private:
       // written keeps its register name, which is already the whole story.
       auto argument = arguments_.find(value.storage);
       if (argument != arguments_.end()) return "arg" + std::to_string(argument->second);
-      return base_name(value, ctx);
+      return ctx.base_name_of(value);
     }
 
     // data-refs may have worked out that this value points at a string, which
@@ -212,14 +211,7 @@ private:
     if (std::string from_data = name_from_data(value, ctx); !from_data.empty())
       return "str_" + from_data;
 
-    return base_name(value, ctx);
-  }
-
-  // The register name without the SSA version.
-  static std::string base_name(const SsaValue &value, const PassContext &ctx) {
-    const std::string full = ctx.name_of(value);
-    const size_t hash = full.rfind('#');
-    return hash == std::string::npos ? full : full.substr(0, hash);
+    return ctx.base_name_of(value);
   }
 
   std::string name_from_data(const SsaValue &value, const PassContext &ctx) {

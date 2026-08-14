@@ -19,6 +19,7 @@
 
 #include "opcodes.hh"
 
+#include <algorithm>
 #include <ostream>
 #include <set>
 
@@ -38,37 +39,15 @@ public:
     if (roots.empty() && ctx.verbose)
       ctx.stream() << "  no calling convention: nothing is treated as live at exit\n";
 
-    int removed = 0;
-
-    // Removing one op can orphan the ops feeding it, so repeat to a fixed
-    // point. The chains are short and each round is linear.
-    for (bool changed = true; changed;) {
-      changed = false;
-
-      for (SsaBlock &block : fn.blocks()) {
-        removed += sweep(block.phis, roots, changed);
-        removed += sweep(block.ops, roots, changed);
-      }
-
-      if (changed) fn.rebuild_uses();
-    }
+    // Removing one op can orphan the ops feeding it, so this repeats to a
+    // fixed point. The chains are short and each round is linear.
+    const int removed = remove_ops_to_fixpoint(
+        fn, [&](const SsaOp *op) { return is_dead(*op, roots); });
 
     if (ctx.verbose) ctx.stream() << "  removed " << removed << " dead op(s)\n";
   }
 
 private:
-  int sweep(std::vector<SsaOp *> &ops, const std::set<int> &roots, bool &changed) const {
-    auto dead = std::remove_if(ops.begin(), ops.end(), [&](const SsaOp *op) {
-      return is_dead(*op, roots);
-    });
-    if (dead == ops.end()) return 0;
-
-    int removed = static_cast<int>(std::distance(dead, ops.end()));
-    ops.erase(dead, ops.end());
-    changed = true;
-    return removed;
-  }
-
   // A load whose address stack-vars resolved to a frame slot is an ordinary
   // read of the function's own memory. The blanket "a load might be a device
   // register" rule does not apply to it, and without this exception an

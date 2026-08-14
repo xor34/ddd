@@ -476,11 +476,7 @@ int session_set_comment(lua_State *L) {
 
 int session_comment(lua_State *L) {
   Session *self = session(L);
-  const std::string *text = self->project().comment(check_address(L, 1));
-  if (text == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, text->data(), text->size());
+  push_optional_string(L, self->project().comment(check_address(L, 1)));
   return 1;
 }
 
@@ -579,32 +575,20 @@ int session_define_data(lua_State *L) {
 
 // Code is blocks: this returns where the block that starts here ends, or nil.
 int session_define_code(lua_State *L) {
-  const uint64_t end = session(L)->define_code(check_address(L, 1));
-  if (end == 0)
-    lua_pushnil(L);
-  else
-    lua_pushinteger(L, static_cast<lua_Integer>(end));
+  push_address_or_nil(L, session(L)->define_code(check_address(L, 1)));
   return 1;
 }
 
 // The stronger claim, with a name from the symbol table if there is one.
 int session_define_function_at(lua_State *L) {
-  const uint64_t end = session(L)->define_function_at(check_address(L, 1));
-  if (end == 0)
-    lua_pushnil(L);
-  else
-    lua_pushinteger(L, static_cast<lua_Integer>(end));
+  push_address_or_nil(L, session(L)->define_function_at(check_address(L, 1)));
   return 1;
 }
 
 // The length of the string that was defined, or nil if there is nothing
 // readable at that address.
 int session_define_string(lua_State *L) {
-  const uint64_t size = session(L)->define_string(check_address(L, 1));
-  if (size == 0)
-    lua_pushnil(L);
-  else
-    lua_pushinteger(L, static_cast<lua_Integer>(size));
+  push_address_or_nil(L, session(L)->define_string(check_address(L, 1)));
   return 1;
 }
 
@@ -640,11 +624,7 @@ int session_set_signature(lua_State *L) {
 
 int session_signature(lua_State *L) {
   Session *self = session(L);
-  const std::string *text = self->project().signature(check_address(L, 1));
-  if (text == nullptr)
-    lua_pushnil(L);
-  else
-    lua_pushlstring(L, text->data(), text->size());
+  push_optional_string(L, self->project().signature(check_address(L, 1)));
   return 1;
 }
 

@@ -1,4 +1,5 @@
 #include "project.h"
+#include "text.h"
 
 #include <fstream>
 #include <iostream>
@@ -7,30 +8,24 @@
 namespace ddd {
 namespace {
 
-bool parse_address(const std::string &text, uint64_t &out) {
-  try {
-    size_t consumed = 0;
-    const int base =
-        (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) ? 16 : 10;
-    out = std::stoull(text, &consumed, base);
-    return consumed == text.size();
-  } catch (...) {
-    return false;
-  }
-}
-
 std::string hex(uint64_t value) {
   std::ostringstream os;
   os << "0x" << std::hex << value;
   return os.str();
 }
 
-// The rest of the line, with the leading space removed.
-std::string tail(std::istringstream &fields) {
+// Reads one token from `fields`, parses it as an address, and reports
+// `path:number: <what>` on failure -- the same shape every directive below
+// needs before it can do anything else.
+bool read_address(std::istringstream &fields, const std::string &path, int number,
+                  uint64_t &out, const char *what = "bad address") {
   std::string text;
-  std::getline(fields, text);
-  if (!text.empty() && text.front() == ' ') text.erase(0, 1);
-  return text;
+  fields >> text;
+  if (!parse_number(text, out)) {
+    std::cerr << path << ":" << number << ": " << what << "\n";
+    return false;
+  }
+  return true;
 }
 
 } // namespace
@@ -158,75 +153,46 @@ bool Project::load(const std::string &path) {
     fields >> verb;
 
     if (verb == "function") {
-      std::string address;
-      fields >> address;
       uint64_t value = 0;
-      if (!parse_address(address, value)) {
-        std::cerr << path << ":" << number << ": bad address\n";
-        continue;
-      }
-      rename_function(value, tail(fields));
+      if (!read_address(fields, path, number, value)) continue;
+      rename_function(value, rest_of_line(fields));
     } else if (verb == "variable") {
-      std::string address, generated;
-      fields >> address >> generated;
       uint64_t value = 0;
-      if (!parse_address(address, value)) {
-        std::cerr << path << ":" << number << ": bad address\n";
-        continue;
-      }
-      rename_variable(value, generated, tail(fields));
+      if (!read_address(fields, path, number, value)) continue;
+      std::string generated;
+      fields >> generated;
+      rename_variable(value, generated, rest_of_line(fields));
     } else if (verb == "type") {
-      std::string address, variable;
-      fields >> address >> variable;
       uint64_t value = 0;
-      if (!parse_address(address, value)) {
-        std::cerr << path << ":" << number << ": bad address\n";
-        continue;
-      }
-      set_type(value, variable, tail(fields));
+      if (!read_address(fields, path, number, value)) continue;
+      std::string variable;
+      fields >> variable;
+      set_type(value, variable, rest_of_line(fields));
     } else if (verb == "comment") {
-      std::string address;
-      fields >> address;
       uint64_t value = 0;
-      if (!parse_address(address, value)) {
-        std::cerr << path << ":" << number << ": bad address\n";
-        continue;
-      }
-      set_comment(value, tail(fields));
+      if (!read_address(fields, path, number, value)) continue;
+      set_comment(value, rest_of_line(fields));
     } else if (verb == "signature") {
-      std::string address;
-      fields >> address;
       uint64_t value = 0;
-      if (!parse_address(address, value)) {
-        std::cerr << path << ":" << number << ": bad address\n";
-        continue;
-      }
-      set_signature(value, tail(fields));
+      if (!read_address(fields, path, number, value)) continue;
+      set_signature(value, rest_of_line(fields));
     } else if (verb == "data") {
-      std::string begin, end;
-      fields >> begin >> end;
       uint64_t from = 0, to = 0;
-      if (!parse_address(begin, from) || !parse_address(end, to)) {
-        std::cerr << path << ":" << number << ": bad range\n";
+      if (!read_address(fields, path, number, from, "bad range") ||
+          !read_address(fields, path, number, to, "bad range"))
         continue;
-      }
       mark_data(from, to);
     } else if (verb == "undefine") {
-      std::string address;
-      fields >> address;
       uint64_t value = 0;
-      if (!parse_address(address, value)) {
-        std::cerr << path << ":" << number << ": bad address\n";
-        continue;
-      }
+      if (!read_address(fields, path, number, value)) continue;
       undefine_function(value);
     } else if (verb == "region") {
       RegionSpec region;
       std::string begin, end;
       fields >> begin >> end >> region.spec >> region.abi >>
           region.stack_pointer;
-      if (!parse_address(begin, region.begin) ||
-          !parse_address(end, region.end) || region.spec.empty()) {
+      if (!parse_number(begin, region.begin) ||
+          !parse_number(end, region.end) || region.spec.empty()) {
         std::cerr << path << ":" << number << ": bad region\n";
         continue;
       }
@@ -239,12 +205,12 @@ bool Project::load(const std::string &path) {
       Mark mark;
       std::string begin, end;
       fields >> begin >> end >> mark.kind;
-      if (!parse_address(begin, mark.begin) || !parse_address(end, mark.end) ||
+      if (!parse_number(begin, mark.begin) || !parse_number(end, mark.end) ||
           mark.kind.empty()) {
         std::cerr << path << ":" << number << ": bad mark\n";
         continue;
       }
-      mark.name = tail(fields);
+      mark.name = rest_of_line(fields);
       add_mark(std::move(mark));
     } else {
       std::cerr << path << ":" << number << ": unknown directive " << verb << "\n";

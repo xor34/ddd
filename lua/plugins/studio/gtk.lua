@@ -148,6 +148,172 @@ function List:select(index)
   if row then self.widget:select_row(row) end
 end
 
+-- ---- modal windows ---------------------------------------------------------
+
+-- The skeleton under every dialog in the studio: a top-level window pinned to
+-- its parent, styled, and closed by Escape. `options.on_key`, if given, sees
+-- every other key first and can claim one by returning true -- which is how a
+-- picker adds up/down, and how the references window adds its own keys,
+-- without each writing its own EventControllerKey and Escape handling.
+function M.modal(parent, options)
+  options = options or {}
+
+  local window = Gtk.Window {
+    title = options.title or "",
+    transient_for = parent,
+    modal = true,
+    decorated = options.decorated ~= false,
+    resizable = options.resizable ~= false,
+    default_width = options.width,
+    default_height = options.height,
+  }
+  window:add_css_class("ddd")
+
+  local keys = Gtk.EventControllerKey()
+  keys.on_key_pressed = function(_, keyval, keycode, state)
+    local name = Gdk.keyval_name(keyval)
+    if options.on_key and options.on_key(name, keyval, keycode, state) then
+      return true
+    end
+    if name == "Escape" then
+      window:close()
+      return true
+    end
+    return false
+  end
+  window:add_controller(keys)
+
+  return window
+end
+
+-- ---- searchable lists ------------------------------------------------------
+
+-- A filter box over a list, plus the "N things, M shown" line that says when
+-- a match was cut short. This is the middle of the function list, the
+-- finder, and the command palette: only what counts as a match and what a
+-- row looks like differs between them.
+--
+-- `options.items(pattern)` returns everything that matches; `options.row(item)`
+-- is the markup for one row. `options.limit`, if given, is how many rows are
+-- actually laid out -- a big binary can have thousands of functions, and the
+-- count says so without paying to build a row for each. `options.count`, set
+-- to false, leaves the count line out entirely (the palette has no use for
+-- it: a command list is never so long that how much of it is hidden matters).
+--
+-- Does not assemble a box: the finder puts the count above the list and the
+-- function view puts it below, and there is nothing wrong with either -- so
+-- the caller lays the pieces out and this only builds them.
+function M.searchable_list(on_activate, options)
+  options = options or {}
+
+  local search = Gtk.SearchEntry { placeholder_text = options.placeholder or "" }
+  search:add_css_class("ddd-search")
+  search.margin_top = 6
+  search.margin_bottom = 6
+  search.margin_start = 8
+  search.margin_end = 8
+
+  local count = options.count ~= false and M.label("", { "ddd-muted", "ddd-mono" })
+    or nil
+  if count then
+    count.margin_start = 10
+    count.margin_bottom = 4
+  end
+
+  local list = M.list(on_activate)
+  local noun = options.noun or "item"
+
+  local function fill(pattern)
+    list:clear()
+
+    local items = options.items(pattern or "")
+    local limit = options.limit or #items
+    local shown = math.min(#items, limit)
+
+    for index = 1, shown do
+      local item = items[index]
+      list:add(options.row(item), item)
+    end
+
+    if count then
+      if #items > shown then
+        count.label = ("%d %ss, %d shown"):format(#items, noun, shown)
+      else
+        count.label = ("%d %s%s"):format(#items, noun, #items == 1 and "" or "s")
+      end
+    end
+
+    if options.select_first ~= false then list:select(1) end
+  end
+
+  search.on_search_changed = function() fill(search.text) end
+
+  return { search = search, count = count, list = list, fill = fill }
+end
+
+-- A modal search-and-select box: type to filter, up/down to move the
+-- selection, enter to act on the selected row (or the first, if nothing was
+-- touched), escape to leave without acting. This is the finder and the
+-- command palette -- the same box with different contents and a different
+-- idea of what counts as a match.
+--
+-- `options.on_no_match(text, close)`, if given, is tried when enter is
+-- pressed and nothing is selected -- the finder's way of taking an address
+-- typed in rather than a name searched for.
+function M.picker(parent, options)
+  options = options or {}
+
+  local window, sl
+
+  local function go(item)
+    window:close()
+    if options.on_activate then options.on_activate(item) end
+  end
+
+  window = M.modal(parent, {
+    title = options.title,
+    width = options.width,
+    height = options.height,
+    decorated = options.decorated,
+    resizable = options.resizable,
+    on_key = function(name)
+      if name == "Down" or name == "Up" then
+        local row = sl.list.widget:get_selected_row()
+        local index = row and row:get_index() or -1
+        local next_row =
+          sl.list.widget:get_row_at_index(index + (name == "Down" and 1 or -1))
+        if next_row then sl.list.widget:select_row(next_row) end
+        return true
+      end
+      return false
+    end,
+  })
+
+  sl = M.searchable_list(go, options)
+
+  sl.search.on_activate = function()
+    local row = sl.list.widget:get_selected_row()
+    local item = row and sl.list.items[row:get_index() + 1] or sl.list.items[1]
+    if item then
+      go(item)
+    elseif options.on_no_match then
+      options.on_no_match(sl.search.text, function() window:close() end)
+    end
+  end
+
+  local box = M.box(Gtk.Orientation.VERTICAL)
+  box:append(sl.search)
+  if sl.count then box:append(sl.count) end
+  box:append(M.scrolled(sl.list.widget))
+  window:set_child(box)
+
+  sl.fill()
+  window:present()
+  sl.search:grab_focus()
+
+  return window, sl
+end
+
 -- ---- asking for something ------------------------------------------------
 
 -- One line of text, modally. GtkDialog is deprecated in this GTK and the

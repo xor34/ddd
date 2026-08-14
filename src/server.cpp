@@ -2,6 +2,7 @@
 
 #include "json.h"
 #include "session.h"
+#include "text.h"
 
 #include <istream>
 #include <ostream>
@@ -176,23 +177,9 @@ std::string hex_json(Session &session, uint64_t address, uint64_t length) {
       .str();
 }
 
-// The rest of a line, with the leading space the reader left behind removed.
-std::string rest_of(std::istringstream &fields) {
-  std::string text;
-  std::getline(fields, text);
-  if (!text.empty() && text.front() == ' ')
-    text.erase(0, 1);
-  return text;
-}
-
 uint64_t number_or(const std::string &text, uint64_t fallback) {
-  if (text.empty())
-    return fallback;
-  try {
-    return std::stoull(text, nullptr, 0);
-  } catch (...) {
-    return fallback;
-  }
+  uint64_t value = 0;
+  return parse_number(text, value) ? value : fallback;
 }
 
 } // namespace
@@ -272,7 +259,7 @@ int serve(Session &session, std::istream &in, std::ostream &out) {
         out << ok_json();
 
       } else if (verb == "signature") {
-        session.project().set_signature(address, rest_of(fields));
+        session.project().set_signature(address, rest_of_line(fields));
         session.save_project();
         out << ok_json();
 
@@ -302,7 +289,7 @@ int serve(Session &session, std::istream &in, std::ostream &out) {
       if (!session.resolve(where, address)) {
         out << error_json("cannot resolve " + where);
       } else if (verb == "comment") {
-        session.project().set_comment(address, rest_of(fields));
+        session.project().set_comment(address, rest_of_line(fields));
         session.save_project();
         out << ok_json();
       } else {
@@ -310,7 +297,7 @@ int serve(Session &session, std::istream &in, std::ostream &out) {
         // renames the function itself.
         std::string variable;
         fields >> variable;
-        const std::string value = rest_of(fields);
+        const std::string value = rest_of_line(fields);
 
         if (verb == "settype")
           session.project().set_type(address, variable, value);

@@ -41,6 +41,15 @@ M.limits = {
   gap_bytes = 256 * 1024,
 }
 
+-- How many listings to keep cached before evicting. A listing is a lot of
+-- tokens, so this is a real budget, not a nicety.
+local kCacheBudget = 400
+
+-- How many of the oldest entries to drop at once, when the budget is
+-- exceeded. Evicting in a batch rather than one-at-a-time means eviction
+-- happens rarely instead of on every listing past the budget.
+local kCacheEvict = 200
+
 local function replace_named(list, spec)
   for i, existing in ipairs(list) do
     if existing.name == spec.name then
@@ -245,6 +254,10 @@ function Context:listing(addr, options)
   local cached = self.cache[key]
   if cached and cached.generation == self.generation then return cached.listing end
 
+  local printer = options.printer or "hil"
+  local machine = options.machine
+  if machine == nil then machine = self.machine or false end
+
   local passes = options.passes or self.pipeline
   if printer ~= "hil" then
     passes = require("ddd.workflow").ending_in(passes, printer)
@@ -263,10 +276,10 @@ function Context:listing(addr, options)
   -- Analysing a whole binary up front means a listing per function, and a
   -- listing is a lot of tokens. Keep the recent ones and let the rest go; a
   -- function that is wanted again is one analysis away.
-  if #self.cached > 400 then
+  if #self.cached > kCacheBudget then
     local kept = {}
-    for i = 201, #self.cached do kept[#kept + 1] = self.cached[i] end
-    for i = 1, 200 do self.cache[self.cached[i]] = nil end
+    for i = kCacheEvict + 1, #self.cached do kept[#kept + 1] = self.cached[i] end
+    for i = 1, kCacheEvict do self.cache[self.cached[i]] = nil end
     self.cached = kept
   end
 

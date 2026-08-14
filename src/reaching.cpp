@@ -3,9 +3,6 @@
 #include "opcodes.hh"
 
 namespace ddd {
-namespace {
-
-} // namespace
 
 std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx) {
   std::set<int> roots;

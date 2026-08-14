@@ -47,58 +47,61 @@ local function annotate_return_address(fn, ctx, reaching, abi)
   if live_in then ctx:label(live_in, "retaddr") end
 end
 
-local function annotate_calls(fn, ctx, reaching, abi)
-  local calls = 0
-
-  for op in fn:ops() do
-    if op.opcode == "CALL" or op.opcode == "CALLIND" then
-      calls = calls + 1
-
-      local arguments = {}
-      for _, register in ipairs(abi.arguments) do
-        local value = reaching:before(op, register)
-
-        -- Either the function put something there for this call, or it is
-        -- forwarding one of its own parameters. A register it neither wrote
-        -- nor read was not set up for this call -- skip it rather than stop,
-        -- so a gap does not hide the arguments after it.
-        if value and not (value.is_live_in and value.use_count == 0) then
-          arguments[#arguments + 1] = ("%s=%s"):format(register, ctx:name(value))
-        end
-      end
-
-      ctx:comment(op, #arguments == 0 and "no arguments detected"
-                      or ("args: " .. table.concat(arguments, ", ")))
-      if abi.result ~= "" then
-        ctx:comment(op, "returns in " .. abi.result)
-      end
-    end
-  end
-
-  return calls
-end
-
 ddd.workflow "readability" {
   passes = function(scope)
     scope.pass "calling-conv" {
       description = "annotate calls with their arguments, and the entry with "
                     .. "its parameters",
 
-      run = function(fn, ctx)
+      -- Everything that is not per-op -- working out the ABI, building the
+      -- reaching-definitions map, naming the parameters and the return
+      -- address -- happens once, before the per-call loop each_op runs.
+      before = function(fn, ctx)
         local abi = ctx.abi
         if not abi or #abi.arguments == 0 then
           if ctx.verbose then ctx:log("  no calling convention known, skipping") end
           return
         end
 
-        local reaching = ddd.reaching(fn, ctx)
+        ctx.calling_conv_abi = abi
+        ctx.calling_conv_reaching = ddd.reaching(fn, ctx)
+        ctx.calling_conv_calls = 0
 
-        annotate_parameters(fn, ctx, reaching, abi)
-        annotate_return_address(fn, ctx, reaching, abi)
-        local calls = annotate_calls(fn, ctx, reaching, abi)
+        annotate_parameters(fn, ctx, ctx.calling_conv_reaching, abi)
+        annotate_return_address(fn, ctx, ctx.calling_conv_reaching, abi)
+      end,
 
-        if ctx.verbose then
-          ctx:log(("  annotated %d call(s)"):format(calls))
+      each_op = function(op, _, ctx)
+        local abi = ctx.calling_conv_abi
+        if not abi then return end
+        if op.opcode ~= "CALL" and op.opcode ~= "CALLIND" then return end
+
+        local reaching = ctx.calling_conv_reaching
+        ctx.calling_conv_calls = ctx.calling_conv_calls + 1
+
+        local arguments = {}
+        for _, register in ipairs(abi.arguments) do
+          local value = reaching:before(op, register)
+
+          -- Either the function put something there for this call, or it is
+          -- forwarding one of its own parameters. A register it neither wrote
+          -- nor read was not set up for this call -- skip it rather than stop,
+          -- so a gap does not hide the arguments after it.
+          if value and not (value.is_live_in and value.use_count == 0) then
+            arguments[#arguments + 1] = ("%s=%s"):format(register, ctx:name(value))
+          end
+        end
+
+        ctx:comment(op, #arguments == 0 and "no arguments detected"
+                        or ("args: " .. table.concat(arguments, ", ")))
+        if abi.result ~= "" then
+          ctx:comment(op, "returns in " .. abi.result)
+        end
+      end,
+
+      after = function(_, ctx)
+        if ctx.calling_conv_abi and ctx.verbose then
+          ctx:log(("  annotated %d call(s)"):format(ctx.calling_conv_calls))
         end
       end,
     }
