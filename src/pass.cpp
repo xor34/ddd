@@ -128,6 +128,15 @@ bool PassManager::add(const std::string &name) {
 }
 
 void PassManager::run(SsaFunction &fn, PassContext &ctx) const {
+  // A worker's copy of a target decodes and nothing else: the storage it names
+  // comes from another Sleigh, so every register a pass compares against would
+  // quietly fail to match. Better to stop here than to produce a listing with
+  // no arguments, no stack frame and no explanation. See Target::decode_only.
+  if (ctx.target != nullptr && ctx.target->decode_only) {
+    std::cerr << "internal error: passes run against a decode-only target\n";
+    std::abort();
+  }
+
   for (const std::shared_ptr<Pass> &pass : passes_) {
     if (ctx.verbose)
       ctx.stream() << "== " << pass->name() << " ==\n";

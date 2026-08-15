@@ -24,7 +24,21 @@ struct Xref {
 class Xrefs {
 public:
   // Adds every reference made by one lifted function.
-  void add(const Cfg &cfg, const std::string &function);
+  //
+  // `from`/`to` bound which instructions count. A sweep may have decoded more
+  // than it is reporting -- a chunk of the image that started a little way
+  // back to be in step by the time it reached its own bytes -- and what it
+  // decoded before `from` is somebody else's to report.
+  //
+  // `inside` is what a branch has to leave to be worth indexing: a branch
+  // within it is the control flow the listing already draws. It defaults to
+  // what the sweep covered, which is right for a whole function and wrong for
+  // a slice of one -- a slice would call every branch across its own edge a
+  // reference, and which branches those were would depend on where the slices
+  // happened to fall.
+  void add(const Cfg &cfg, const std::string &function, uint64_t from = 0,
+           uint64_t to = UINT64_MAX, uint64_t inside_begin = 0,
+           uint64_t inside_end = 0);
 
   // References *to* an address, in the order they were found.
   const std::vector<Xref> &to(uint64_t address) const;

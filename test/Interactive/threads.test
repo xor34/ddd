@@ -1,0 +1,49 @@
+# Sweeping on several threads finds exactly what one thread finds.
+#
+# The two stages of the analysis -- indexing the references, then bounding the
+# functions -- run on a pool. That is only tolerable if it is invisible: the
+# reference index is a list per address, the function list is a map, and both
+# are ordered by what was found first. So the work goes out in batches and what
+# comes back is recorded in the order it went out, never in the order the
+# threads happened to finish.
+#
+# This is the test of that. Same binary, same questions, one thread against
+# six, byte for byte.
+
+# RUN: rm -rf %t && mkdir -p %t
+
+# Big enough to be worth threading, which is the point: a decoder takes a
+# fraction of a second to copy, and until the copies arrive there is nothing to
+# spread the work over. A binary the sweep finishes first would compare one
+# thread against one thread and pass without testing anything.
+# RUN: echo 'int f0(int x) { return x + 1; }' > %t/p.c
+# RUN: for i in $(seq 1 1500); do echo "int f$i(int x) { int t = f$((i-1))(x); return t > $i ? t * $i : t + $i; }" >> %t/p.c; done
+# RUN: echo 'int main(void) { return f1500(3); }' >> %t/p.c
+# RUN: gcc -O0 -no-pie -o %t/p %t/p.c
+
+# Stripped, so where the functions are is worked out rather than read out --
+# which is the stage that runs on the threads.
+# RUN: strip %t/p
+
+# RUN: printf 'functions\nxrefs main\nquit\n' > %t/ask
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/one.ddd \
+# RUN:   --threads=1 --server < %t/ask > %t/one 2> %t/one.log
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/six.ddd \
+# RUN:   --threads=6 --server < %t/ask > %t/six 2> %t/six.log
+
+# RUN: diff %t/one %t/six
+
+# The comparison is only worth anything if the second run really did spread
+# out, so it says so and this checks that it said so.
+# RUN: FileCheck --check-prefix=SPREAD %s < %t/six.log
+# SPREAD: sweeping on {{[2-9]}} thread(s)
+
+# RUN: FileCheck --check-prefix=ALONE %s < %t/one.log
+# ALONE-NOT: sweeping on
+
+# And it found something to compare: a run that missed every function would
+# also match itself.
+# RUN: FileCheck --check-prefix=FOUND %s < %t/one.log
+# FOUND: 1{{[0-9][0-9][0-9]}} function(s) found

@@ -14,6 +14,7 @@
 #include "elf.h"
 #include "hil.h"
 #include "image.h"
+#include "parallel.h"
 #include "pass.h"
 #include "project.h"
 #include "regions.h"
@@ -21,6 +22,7 @@
 #include "xrefs.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <ostream>
@@ -41,9 +43,15 @@ struct Lifted {
 // Sweeps a region from `entry` (or its beginning) and returns what decoded, or
 // null if nothing did. With an image, the sweep stops at bytes that have been
 // marked as data -- which is what makes "this is not code" mean something.
+//
+// `disassemble` is what a listing wants and what a sweep looking for extents
+// and references does not: the text costs a second decode of every
+// instruction, which is half the work of the two stages that only ever ask
+// where things are.
 std::unique_ptr<Lifted> lift(const Region &region, uint64_t entry,
                              int max_instructions,
-                             const Image *image = nullptr);
+                             const Image *image = nullptr,
+                             bool disassemble = true);
 
 struct FunctionInfo {
   uint64_t addr = 0;
@@ -170,26 +178,53 @@ public:
   void discover_functions();
   bool discovered() const { return discovered_; }
 
-  // ---- doing it a slice at a time ---------------------------------------
+  // ---- doing it a slice at a time, on as many threads as it can -----------
   //
   // Both of the above are sweeps of the whole image, and an interface that
-  // calls one has no window until it returns. Threading them is not the answer
-  // it looks like: a Sleigh translator holds decode state and is shared per
-  // instruction set, and the passes are Lua, which is one interpreter -- so
-  // two threads doing this would spend their time waiting for each other.
+  // calls one has no window until it returns. Two things are done about that,
+  // and they are not alternatives: the work yields, and the work is spread.
   //
-  // Yielding is the answer. Each call does a bounded amount of work and says
-  // where it got to; a caller runs it until `finished`, on an idle handler, and
-  // stays answerable in between.
+  // *Yielding* is what keeps the window answering. Each call does a bounded
+  // amount of work and says where it got to; a caller runs it until
+  // `finished`, on an idle handler, and stays answerable in between. That is
+  // still true with threads: a step fans its slice out, joins, and returns.
+  //
+  // *Spreading* is what makes the work finish. Both stages are a decode and
+  // nothing else -- what the bytes are, what they refer to, where control flow
+  // stops -- and every answer either produces is an address. Addresses are
+  // integers, so the results merge whichever thread found them, in the order
+  // the batch went out, which is what keeps the index and the function list
+  // identical to the ones a single thread would have built.
+  //
+  // What is *not* threaded is everything downstream of that: building SSA and
+  // running the pipeline over one function. Passes are Lua as often as C++,
+  // and that is one interpreter. It is also the part that does not need it --
+  // it runs per function, on the function you are looking at, and the two
+  // sweeps here are what you wait for on a binary of any size.
+  //
+  // The cost of a thread is a copy of the decoder, since a Sleigh caches the
+  // instruction it last parsed and cannot be inside two sweeps at once. Those
+  // are loaded in the background (see TargetSet::warm), so the analysis starts
+  // on one thread and widens as they arrive rather than stopping to load them.
   struct AnalysisStep {
     std::string stage; // "references", "functions", "done"
     uint64_t done = 0;
     uint64_t total = 0; // 0 when the total is not known yet
     bool finished = false;
+    int threads = 1;    // how many the step actually ran on
   };
 
-  // `budget` is the instructions to decode in one go. Smaller is smoother.
+  // `budget` is roughly the instructions to decode in one go, per thread.
+  // Smaller is smoother. It bounds how much a step does, and deliberately not
+  // where the sweeps are cut: those boundaries are fixed, so that what is
+  // found does not depend on who asked or on how many threads answered.
   AnalysisStep analyse_step(int budget = 20000);
+
+  // How many threads the sweeps may use. 0 decides from the size of the image:
+  // an image with little enough code in it is not worth a decoder per thread.
+  // 1 keeps everything on the calling thread.
+  void set_threads(int threads) { threads_ = threads; }
+  int threads() const { return threads_; }
 
   // Says the reference index is out of date, without throwing it away: an edit
   // that changes what is code changes what refers to what, but the answers
@@ -327,6 +362,13 @@ private:
   std::unique_ptr<Xrefs> xrefs_;
   std::ostream *log_ = nullptr;
 
+  // 0 until the first threaded step decides; the pool outlives the step, since
+  // the steps arrive one after another and starting threads per step would
+  // cost more than a step.
+  int threads_ = 0;
+  std::unique_ptr<Pool> pool_;
+  int announced_threads_ = 1; // what the log has been told, to say it once
+
   // Functions worked out rather than read out of a symbol table, by start
   // address. Empty until discover_functions() has run. Mirrored into the tree,
   // and kept because a function's extent is asked for by pointer.
@@ -365,7 +407,26 @@ private:
 
   // The two halves of discovery, so it can be done a piece at a time.
   void collect_starts();
-  bool bound_start(size_t index);
+
+  // One candidate start, worked out and not yet recorded. The working out is
+  // what a worker does; recording it is the caller's, in batch order, because
+  // that is what the region tree and the function map are ordered by.
+  struct Bounded {
+    bool ok = false;
+    uint64_t address = 0;
+    uint64_t end = 0;
+    std::string name;
+  };
+  Bounded bound_start(size_t index, int slot) const;
+
+  // How many threads this step may spread over, asking for the decoders it
+  // needs on the way. At least one.
+  int analysis_threads();
+
+  // `body(index, slot)` for every index below `count`, on the pool if there is
+  // one. `slot` is which decoder the body may use.
+  void in_parallel(size_t count,
+                   const std::function<void(size_t index, int slot)> &body);
 
   // Where the next function starts, which is where this one has to stop.
   uint64_t next_function_after(uint64_t address, uint64_t limit) const;

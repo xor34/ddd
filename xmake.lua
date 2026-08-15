@@ -130,9 +130,14 @@ target("sleigh_poc")
     add_deps("sla")
     add_packages("abseil", "lua")
 
+    -- The sweeps run on a pool of threads (src/parallel.h).
+    add_syslinks("pthread")
+
     -- So a Lua C module loaded at runtime -- lgi, and anything else a plugin
     -- requires -- resolves the interpreter's symbols against this process.
-    add_ldflags("-rdynamic", {force = true})
+    add_ldflags("-rdynamic -fsanitize=address,undefined", {force = true})
+
+    add_cxxflags("-fsanitize=address,undefined")
 
 -- `xmake check` -- build sleigh_poc, then run the lit-style suite in test/.
 -- Extra arguments go through to the runner, e.g.

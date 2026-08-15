@@ -35,18 +35,35 @@ struct TargetSet::Instance {
   std::unique_ptr<ghidra::Sleigh> sleigh;
 };
 
+// One worker's private set: a copy of every instance, and a decode-only view
+// of every Target pointing into the copy rather than the original.
+struct TargetSet::Worker {
+  std::vector<std::unique_ptr<Instance>> instances; // as instances_
+  std::deque<Target> views;                         // as targets_
+};
+
 TargetSet::TargetSet(const Image &image)
-    : loader_(std::make_unique<ImageLoader>(image)) {}
+    : loader_(std::make_unique<ImageLoader>(image)) {
+  // Sized once, so that publishing a worker never moves one another thread is
+  // already reading. Slot zero is the caller's own, and has no entry.
+  workers_.resize(kMaxWorkers - 1);
+}
 
-TargetSet::~TargetSet() = default;
+TargetSet::~TargetSet() {
+  {
+    std::lock_guard<std::mutex> lock(state_);
+    stopping_ = true;
+  }
+  wake_.notify_all();
+  if (warming_.joinable())
+    warming_.join();
+}
 
-TargetSet::Instance *
-TargetSet::instance_for(const std::string &spec,
-                        const std::vector<std::string> &context) {
-  for (const std::unique_ptr<Instance> &instance : instances_)
-    if (instance->spec == spec && instance->context == context)
-      return instance.get();
-
+// Reading a spec, which is the expensive half of acquiring a target and the
+// half a worker has to repeat.
+std::unique_ptr<TargetSet::Instance>
+TargetSet::load(const std::string &spec,
+                const std::vector<std::string> &context) {
   auto instance = std::make_unique<Instance>();
   instance->spec = spec;
   instance->context = context;
@@ -56,6 +73,11 @@ TargetSet::instance_for(const std::string &spec,
 
   std::string absolute = std::filesystem::absolute(spec).string();
   std::istringstream wrapper("<sleigh>" + absolute + "</sleigh>");
+
+  // Sleigh's XML reader is not reentrant -- the scanner and the content
+  // handler are file-scope globals in xml.cc -- so however many threads are
+  // asking, exactly one document is read at a time.
+  std::lock_guard<std::mutex> lock(loading_);
 
   ghidra::DocumentStorage storage;
   try {
@@ -86,8 +108,150 @@ TargetSet::instance_for(const std::string &spec,
     }
   }
 
+  return instance;
+}
+
+TargetSet::Instance *
+TargetSet::instance_for(const std::string &spec,
+                        const std::vector<std::string> &context) {
+  for (const std::unique_ptr<Instance> &instance : instances_)
+    if (instance->spec == spec && instance->context == context)
+      return instance.get();
+
+  std::unique_ptr<Instance> instance = load(spec, context);
+  if (instance == nullptr)
+    return nullptr;
+
   instances_.push_back(std::move(instance));
   return instances_.back().get();
+}
+
+// ---- decoding on more than one thread -----------------------------------
+
+void TargetSet::warm(int workers) {
+  if (workers > kMaxWorkers)
+    workers = kMaxWorkers;
+
+  {
+    std::lock_guard<std::mutex> lock(state_);
+    if (workers <= wanted_)
+      return;
+    wanted_ = workers;
+
+    // Started on the first ask rather than in the constructor: a run that only
+    // prints one function never wants a copy of anything, and should not pay
+    // for a thread to decide that.
+    if (!warming_.joinable())
+      warming_ = std::thread([this] { build_workers(); });
+  }
+
+  wake_.notify_all();
+}
+
+// The warming thread, from here to the end of the process.
+//
+// One slot at a time, in order, publishing each before starting the next --
+// which is what lets the analysis widen as they arrive instead of waiting for
+// the last one.
+void TargetSet::build_workers() {
+  while (true) {
+    std::vector<std::pair<std::string, std::vector<std::string>>> specs;
+    std::vector<Target> shape;
+    int slot = 0;
+
+    {
+      std::unique_lock<std::mutex> lock(state_);
+      wake_.wait(lock, [this] {
+        return stopping_ || ready_.load(std::memory_order_relaxed) < wanted_;
+      });
+      if (stopping_)
+        return;
+
+      slot = ready_.load(std::memory_order_relaxed);
+      for (const std::unique_ptr<Instance> &instance : instances_)
+        specs.emplace_back(instance->spec, instance->context);
+      shape.assign(targets_.begin(), targets_.end());
+    }
+
+    auto worker = std::make_unique<Worker>();
+    for (const auto &[spec, context] : specs) {
+      std::unique_ptr<Instance> instance = load(spec, context);
+      if (instance == nullptr) {
+        // A spec that loaded once and will not load again is not something to
+        // keep retrying on a thread nobody is watching.
+        std::lock_guard<std::mutex> lock(state_);
+        wanted_ = ready_.load(std::memory_order_relaxed);
+        worker.reset();
+        break;
+      }
+      worker->instances.push_back(std::move(instance));
+    }
+    if (worker == nullptr)
+      continue;
+
+    // A view per Target, pointing into this worker's copy of whichever
+    // instance the original was made from.
+    for (const Target &original : shape) {
+      Target view = original;
+      view.decode_only = true;
+      view.translator = nullptr;
+      // Nothing a sweep needs, and everything that would be wrong if a pass
+      // ever saw it: these name storage, and storage from another instance is
+      // another pointer. See the comment on Target::decode_only.
+      view.abi = nullptr;
+      view.stack_pointer = Storage{};
+
+      for (size_t i = 0; i < specs.size(); ++i) {
+        if (specs[i].first != original.spec || specs[i].second != original.context)
+          continue;
+        view.translator = worker->instances[i]->sleigh.get();
+        break;
+      }
+      worker->views.push_back(std::move(view));
+    }
+
+    std::lock_guard<std::mutex> lock(state_);
+
+    // Something was acquired while this was being built, so the slot does not
+    // cover everything after all. Build it again against what is there now.
+    if (specs.size() != instances_.size() || shape.size() != targets_.size())
+      continue;
+    if (slot != ready_.load(std::memory_order_relaxed) || slot >= kMaxWorkers)
+      continue;
+
+    workers_[static_cast<size_t>(slot) - 1] = std::move(worker);
+    ready_.store(slot + 1, std::memory_order_release);
+  }
+}
+
+Target *TargetSet::decoder(Target &target, int slot) {
+  if (slot <= 0)
+    return &target;
+  if (slot >= ready_.load(std::memory_order_acquire))
+    return nullptr;
+
+  Worker *worker = workers_[static_cast<size_t>(slot) - 1].get();
+  if (worker == nullptr)
+    return nullptr;
+
+  // Which Target this is, by where it sits: the views were built from the same
+  // sequence, so the answer is the same index.
+  size_t index = 0;
+  for (const Target &candidate : targets_) {
+    if (&candidate == &target)
+      return index < worker->views.size() ? &worker->views[index] : nullptr;
+    ++index;
+  }
+  return nullptr;
+}
+
+int TargetSet::instance_count() const {
+  std::lock_guard<std::mutex> lock(state_);
+  int count = static_cast<int>(instances_.size());
+  for (const std::unique_ptr<Worker> &worker : workers_)
+    if (worker != nullptr)
+      count += static_cast<int>(worker->instances.size());
+  return count;
 }
 
 Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
@@ -98,6 +262,11 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
   // an explicit context is the whole point of a mode switch and must win.
   const std::vector<std::string> effective =
       context.empty() ? default_context(spec) : context;
+
+  // Held across the whole of this: what the warming thread copies is
+  // `instances_` and `targets_`, and a worker is only usable when it covers
+  // all of both.
+  std::lock_guard<std::mutex> lock(state_);
 
   Instance *instance = instance_for(spec, effective);
   if (instance == nullptr)
@@ -135,6 +304,13 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
   }
 
   targets_.push_back(std::move(target));
+
+  // A target the workers were not built to cover. They go back to being
+  // unusable until the warming thread has caught up, rather than one of them
+  // decoding through an instance another thread is already inside.
+  ready_.store(1, std::memory_order_release);
+  wake_.notify_all();
+
   return &targets_.back();
 }
 

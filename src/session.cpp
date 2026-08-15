@@ -22,6 +22,32 @@ bool is_printer(const std::string &pass) {
   return pass == "hil" || pass == "print-ssa";
 }
 
+// The grid the reference index is swept on.
+//
+// Fixed, and derived from neither the number of threads nor the caller's
+// budget, because it decides where one sweep stops and the next begins. A
+// boundary that moved with the machine, or with whether a window or a script
+// was asking, would move which instructions were decoded from where -- and an
+// index that differs run to run is one that cannot be tested and cannot be
+// trusted.
+constexpr uint64_t kIndexChunk = 8192;
+
+// How far before its chunk a sweep starts.
+//
+// Nothing in a variable-length instruction set says where an instruction
+// begins except the one before it, so a sweep that starts at an arbitrary
+// offset can start out of step. Running up to the chunk from a little way back
+// is how it arrives in step -- x86 recovers within a few bytes -- and
+// everything decoded before the chunk is thrown away either way.
+//
+// Zero where the instruction set is aligned: there the chunk boundary is
+// already an instruction boundary, and the run-up would be waste.
+constexpr uint64_t kResync = 64;
+
+// Below this much code, threads are not worth a copy of the decoder each --
+// the copy takes longer to read than the sweep takes to run.
+constexpr uint64_t kThreadsFrom = 128 * 1024;
+
 // The address one past the last instruction reachable from the entry.
 //
 // The sweep is linear, so it decodes whatever was laid out after the function
@@ -59,7 +85,8 @@ uint64_t reachable_end(const Cfg &cfg) {
 } // namespace
 
 std::unique_ptr<Lifted> lift(const Region &region, uint64_t entry,
-                             int max_instructions, const Image *image) {
+                             int max_instructions, const Image *image,
+                             bool disassemble) {
   if (region.target == nullptr || region.target->translator == nullptr)
     return nullptr;
 
@@ -69,6 +96,7 @@ std::unique_ptr<Lifted> lift(const Region &region, uint64_t entry,
 
   SweepLimits limits;
   limits.max_instructions = max_instructions;
+  limits.disassemble = disassemble;
   limits.end = ghidra::Address(translator.getDefaultCodeSpace(), region.end);
 
   // What somebody said is not code stops the sweep, so that saying it has an
@@ -241,7 +269,15 @@ void Session::collect_starts() {
 }
 
 // One candidate start: bound it, work out where it really ends, name it.
-bool Session::bound_start(size_t index) {
+//
+// Nothing here writes anything down. Everything it reads -- the regions, the
+// starts, the image, what the project says is not a function -- is settled
+// before the batch goes out and not touched until it comes back, which is what
+// lets a worker run this while fifteen others run it for fifteen other
+// addresses. What comes back is an address, an extent and a name; the caller
+// records those, in order.
+Session::Bounded Session::bound_start(size_t index, int slot) const {
+  Bounded bounded;
   const uint64_t address = starts_[index];
 
   const Region *region = nullptr;
@@ -249,11 +285,11 @@ bool Session::bound_start(size_t index) {
     if (address >= candidate.begin && address < candidate.end)
       region = &candidate;
   if (region == nullptr)
-    return false;
+    return bounded;
 
   // Something the user has already said is not a function.
   if (project_.is_undefined(address))
-    return false;
+    return bounded;
 
   // The next start is an upper bound: whatever this function is, it stops
   // before the next thing anybody calls.
@@ -262,17 +298,23 @@ bool Session::bound_start(size_t index) {
       starts_[index + 1] < end)
     end = starts_[index + 1];
   if (end <= address)
-    return false;
+    return bounded;
 
   // And then control flow says where it really stops. A linear sweep runs
   // straight past a `ret` into whatever was laid out next, and everything it
   // picks up that way is unreachable from the entry -- so the last address
   // reachable from the entry is the end of the function.
-  Region bounded = *region;
-  bounded.begin = address;
-  bounded.end = end;
+  Region span = *region;
+  span.begin = address;
+  span.end = end;
+  span.target = targets_->decoder(*region->target, slot);
+  if (span.target == nullptr)
+    span.target = region->target; // the copy is not ready; slot zero's own
+
+  // No disassembly text: this asks where the function stops, and nothing here
+  // ever looks at what the instructions say.
   if (std::unique_ptr<Lifted> lifted =
-          lift(bounded, address, max_instructions_, image_)) {
+          lift(span, address, max_instructions_, image_, false)) {
     if (uint64_t reached = reachable_end(lifted->cfg); reached > address)
       end = reached;
   }
@@ -284,8 +326,11 @@ bool Session::bound_start(size_t index) {
   else
     name << "sub_" << std::hex << address;
 
-  define_function(address, end, name.str());
-  return true;
+  bounded.ok = true;
+  bounded.address = address;
+  bounded.end = end;
+  bounded.name = name.str();
+  return bounded;
 }
 
 // Marking an edit rather than undoing the work.
@@ -305,8 +350,53 @@ void Session::invalidate_index() {
   discovered_ = false;
 }
 
+// How many threads this step gets, and asking for what they need.
+//
+// Auto only turns them on for an image with enough code in it to be worth a
+// decoder per thread; an explicit --threads is taken as meant. Either way the
+// answer is bounded by how many copies of the decoder have actually been read
+// so far, which is what lets the first steps run while the rest are loading.
+int Session::analysis_threads() {
+  int wanted = threads_;
+  if (wanted == 0) {
+    uint64_t code = 0;
+    for (const Region &region : regions_)
+      if (region.target != nullptr && region.end > region.begin)
+        code += region.end - region.begin;
+    wanted = code >= kThreadsFrom ? default_thread_count() : 1;
+  }
+
+  wanted = std::max(1, std::min(wanted, TargetSet::kMaxWorkers));
+  if (wanted == 1)
+    return 1;
+
+  targets_->warm(wanted);
+  if (pool_ == nullptr)
+    pool_ = std::make_unique<Pool>(wanted);
+
+  const int usable = std::min(wanted, targets_->ready_workers());
+  if (usable > announced_threads_) {
+    announced_threads_ = usable;
+    log() << "sweeping on " << usable << " thread(s)\n";
+  }
+  return usable;
+}
+
+void Session::in_parallel(
+    size_t count, const std::function<void(size_t index, int slot)> &body) {
+  const int slots = analysis_threads();
+  if (pool_ == nullptr || slots == 1) {
+    for (size_t index = 0; index < count; ++index)
+      body(index, 0);
+    return;
+  }
+  pool_->run(count, body, slots);
+}
+
 Session::AnalysisStep Session::analyse_step(int budget) {
   AnalysisStep step;
+  const int slots = analysis_threads();
+  step.threads = slots;
 
   if (xrefs_ == nullptr && pending_xrefs_ == nullptr) {
     pending_xrefs_ = std::make_unique<Xrefs>();
@@ -315,9 +405,14 @@ Session::AnalysisStep Session::analyse_step(int budget) {
     indexed_ = false;
   }
 
-  // Stage one: index the references, a slice of instructions at a time. The
-  // slices are where the yielding happens -- a sweep of a megabyte of .text is
-  // one call that returns when it is good and ready.
+  // Stage one: index the references, a slice of the image at a time, each
+  // slice cut into chunks that go out to the threads together.
+  //
+  // The chunks are a fixed grid over the region, so a chunk covers the same
+  // bytes whoever sweeps it and however many are sweeping. What the budget
+  // decides is only how many of them one call does -- which is the yielding,
+  // and is why a window can ask for a frame's worth and a script for a
+  // hundred times that.
   if (!indexed_) {
     step.stage = "references";
 
@@ -331,26 +426,62 @@ Session::AnalysisStep Session::analyse_step(int budget) {
         continue;
       }
 
-      std::unique_ptr<Lifted> lifted = lift(region, from, budget, image_);
-      if (lifted == nullptr) {
-        ++index_region_;
-        index_at_ = 0;
-        continue;
-      }
+      // At least one chunk per thread, so none of them stands idle, and more
+      // when the caller asked for more. `budget` is in instructions and this
+      // is in bytes: eight is a generous instruction.
+      const uint64_t asked = (static_cast<uint64_t>(std::max(1, budget)) * 8 +
+                              kIndexChunk - 1) / kIndexChunk;
+      const uint64_t left =
+          (region.end - from + kIndexChunk - 1) / kIndexChunk;
+      const size_t chunks = static_cast<size_t>(
+          std::min(left, std::max<uint64_t>(asked, static_cast<uint64_t>(slots))));
 
-      pending_xrefs_->add(lifted->cfg, "");
+      // An aligned instruction set needs no run-up: the grid is a multiple of
+      // every alignment there is, so a chunk already begins where an
+      // instruction does.
+      const uint64_t resync =
+          region.target->translator->getAlignment() > 1 ? 0 : kResync;
 
-      // Where the sweep actually stopped; if it made no progress, give up on
-      // this region rather than spin.
-      const uint64_t next = lifted->cfg.code_end;
-      if (next <= from) {
-        ++index_region_;
-        index_at_ = 0;
-        continue;
+      std::vector<std::unique_ptr<Lifted>> swept(chunks);
+      in_parallel(chunks, [&](size_t index, int slot) {
+        const uint64_t begin = from + index * kIndexChunk;
+        const uint64_t end = std::min(begin + kIndexChunk, region.end);
+        const uint64_t at =
+            begin > region.begin ? std::max(region.begin, begin - resync) : begin;
+
+        Region chunk = region;
+        chunk.begin = at;
+        chunk.end = end;
+        chunk.target = targets_->decoder(*region.target, slot);
+        if (chunk.target == nullptr)
+          chunk.target = region.target; // only slot zero, and that is its own
+
+        // One instruction per byte is the most there can be, so this cannot
+        // cut the chunk short; the end address is what bounds it.
+        swept[index] = lift(chunk, at, static_cast<int>(end - at), image_,
+                            /*disassemble=*/false);
+      });
+
+      // Merged in chunk order, on this thread: the index is a list per address
+      // and the order things were found in is the order they are shown in.
+      uint64_t next = from;
+      for (size_t index = 0; index < chunks; ++index) {
+        const uint64_t begin = from + index * kIndexChunk;
+        const uint64_t end = std::min(begin + kIndexChunk, region.end);
+        next = end;
+
+        if (swept[index] == nullptr)
+          continue;
+        // Only what this chunk is responsible for -- the run-up decoded the
+        // bytes before it to get in step, not to report them -- and "inside"
+        // is the region, not the chunk, or every branch across a boundary
+        // would look like one leaving.
+        pending_xrefs_->add(swept[index]->cfg, "", begin, end, region.begin,
+                            region.end);
       }
 
       index_at_ = next;
-      step.done = next - region.begin;
+      step.done = index_at_ - region.begin;
       step.total = region.end - region.begin;
       return step;
     }
@@ -367,13 +498,26 @@ Session::AnalysisStep Session::analyse_step(int budget) {
     return step;
   }
 
-  // Stage two: bound each candidate. One lift each, so a handful per call.
+  // Stage two: bound each candidate. One lift each, and they know nothing
+  // about each other, so a batch of them is the easiest thing here to spread
+  // -- what comes back is recorded in the order it went out.
   if (!discovered_) {
     step.stage = "functions";
     step.total = starts_.size();
 
-    for (int done = 0; done < 8 && start_at_ < starts_.size(); ++done)
-      bound_start(start_at_++);
+    const size_t count =
+        std::min<size_t>(static_cast<size_t>(8) * slots,
+                         starts_.size() - start_at_);
+
+    std::vector<Bounded> bounded(count);
+    in_parallel(count, [&](size_t index, int slot) {
+      bounded[index] = bound_start(start_at_ + index, slot);
+    });
+
+    for (const Bounded &one : bounded)
+      if (one.ok)
+        define_function(one.address, one.end, one.name);
+    start_at_ += count;
 
     step.done = start_at_;
     if (start_at_ < starts_.size())

@@ -4,7 +4,13 @@
 
 namespace ddd {
 
-void Xrefs::add(const Cfg &cfg, const std::string &function) {
+void Xrefs::add(const Cfg &cfg, const std::string &function, uint64_t first,
+                uint64_t last, uint64_t inside_begin, uint64_t inside_end) {
+  if (inside_end <= inside_begin) {
+    inside_begin = cfg.code_begin;
+    inside_end = cfg.code_end;
+  }
+
   auto record = [&](uint64_t from, uint64_t to, const char *kind) {
     Xref xref;
     xref.from = from;
@@ -18,6 +24,8 @@ void Xrefs::add(const Cfg &cfg, const std::string &function) {
   for (const BasicBlock &block : cfg.blocks) {
     for (const PcodeOp &op : block.ops) {
       const uint64_t from = op.addr.getOffset();
+      if (from < first || from >= last)
+        continue;
 
       switch (op.opc) {
       case ghidra::CPUI_CALL:
@@ -29,7 +37,8 @@ void Xrefs::add(const Cfg &cfg, const std::string &function) {
         // Only branches leaving this function are worth indexing; the ones
         // inside it are the control flow the listing already draws.
         if (!op.inputs.empty() && !is_constant(op.inputs[0]) &&
-            (op.inputs[0].offset < cfg.code_begin || op.inputs[0].offset >= cfg.code_end))
+            (op.inputs[0].offset < inside_begin ||
+             op.inputs[0].offset >= inside_end))
           record(from, op.inputs[0].offset, "branch");
         break;
 

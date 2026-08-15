@@ -55,6 +55,9 @@ ABSL_FLAG(uint64_t, base, 0, "Address the image is loaded at");
 ABSL_FLAG(uint64_t, entry, 0,
           "Address to start disassembling from (default: --base)");
 ABSL_FLAG(int, max, 100000, "Maximum instructions per region");
+ABSL_FLAG(int, threads, 0,
+          "Threads to sweep the image with. 0 decides from its size; 1 keeps "
+          "everything on one thread. Each costs a copy of the decoder");
 ABSL_FLAG(uint64_t, code_end, 0,
           "Stop disassembling here; the rest of the image is data");
 ABSL_FLAG(std::vector<std::string>, ctx, {}, "Context variables NAME=VALUE");
@@ -631,6 +634,7 @@ int main(int argc, char **argv) {
     session.set_passes(resolve_passes());
     session.set_spec_dir(spec_dir);
     session.set_max_instructions(absl::GetFlag(FLAGS_max));
+    session.set_threads(absl::GetFlag(FLAGS_threads));
     session.open_project(project_path);
     // stdout carries the protocol in server mode, and belongs to the interface
     // in every other: one stray line of prose corrupts either.
