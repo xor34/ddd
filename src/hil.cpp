@@ -575,6 +575,9 @@ private:
         statement.value = operand(op, 1, 0);
         for (const Edge &edge : raw.succs)
           (edge.conditional ? statement.taken : statement.fallthrough) = edge.target;
+        // No block took the conditional edge because the destination is not in
+        // this function: a conditional tail call.
+        if (statement.taken < 0) statement.leaves_to = raw.leaves_to;
         return statement;
       }
       break;
@@ -582,6 +585,7 @@ private:
     case ghidra::CPUI_BRANCH:
       statement.kind = StatementKind::Branch;
       if (!raw.succs.empty()) statement.taken = raw.succs.front().target;
+      else statement.leaves_to = raw.leaves_to;
       return statement;
 
     case ghidra::CPUI_CALL:
@@ -773,6 +777,42 @@ void emit(std::vector<Token> &out, ExprRef expr, int parent_precedence) {
   if (parenthesise) out.push_back({"punct", ")", ""});
 }
 
+// Where a branch goes, as a token and as something an interface can act on.
+//
+// Three answers, and they are not the same kind of thing. A block in this
+// function is a label, and the interface prints the label it gave that block.
+// An address outside it is a function -- a tail call is a call, however it is
+// spelled -- so it goes out as an address for the interface to name and to
+// follow. And a computed destination is genuinely unknown, which is worth
+// saying rather than printing as a block that does not exist.
+void emit_target(TokenLine &line, const Statement &statement) {
+  if (statement.taken >= 0) {
+    line.taken = statement.taken;
+    line.tokens.push_back({"block", std::to_string(statement.taken), ""});
+    return;
+  }
+
+  if (statement.leaves_to != 0) {
+    std::ostringstream text;
+    text << "0x" << std::hex << statement.leaves_to;
+    line.leaves_to = statement.leaves_to;
+    line.tokens.push_back({"extern", text.str(), ""});
+    return;
+  }
+
+  line.tokens.push_back({"extern", "?", ""});
+}
+
+// The same three answers, for the printer that has no interface behind it.
+void render_target(std::ostream &out, const Statement &statement) {
+  if (statement.taken >= 0)
+    out << statement.taken;
+  else if (statement.leaves_to != 0)
+    out << "0x" << std::hex << statement.leaves_to << std::dec;
+  else
+    out << "?";
+}
+
 } // namespace
 
 std::vector<TokenBlock> tokenize(const Hil &hil, const SsaFunction &fn,
@@ -828,8 +868,9 @@ std::vector<TokenBlock> tokenize(const Hil &hil, const SsaFunction &fn,
         emit(line.tokens, statement.value, kLowest);
         line.tokens.push_back({"punct", ")", ""});
         line.tokens.push_back({"keyword", "goto", ""});
-        line.tokens.push_back({"block", std::to_string(statement.taken), ""});
+        emit_target(line, statement);
         if (statement.fallthrough >= 0) {
+          line.fallthrough = statement.fallthrough;
           line.tokens.push_back({"keyword", "else goto", ""});
           line.tokens.push_back({"block", std::to_string(statement.fallthrough), ""});
         }
@@ -837,7 +878,7 @@ std::vector<TokenBlock> tokenize(const Hil &hil, const SsaFunction &fn,
 
       case StatementKind::Branch:
         line.tokens.push_back({"keyword", "goto", ""});
-        line.tokens.push_back({"block", std::to_string(statement.taken), ""});
+        emit_target(line, statement);
         break;
 
       case StatementKind::Call:
@@ -919,12 +960,14 @@ std::string to_string(const Hil &hil, const SsaFunction &fn, const PassContext &
       case StatementKind::CondBranch:
         line << "if (";
         render(line, statement.value, kLowest);
-        line << ") goto " << statement.taken;
+        line << ") goto ";
+        render_target(line, statement);
         if (statement.fallthrough >= 0) line << " else goto " << statement.fallthrough;
         break;
 
       case StatementKind::Branch:
-        line << "goto " << statement.taken;
+        line << "goto ";
+        render_target(line, statement);
         break;
 
       case StatementKind::Call:

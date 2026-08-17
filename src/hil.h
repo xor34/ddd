@@ -77,6 +77,13 @@ struct Statement {
   ExprRef address = nullptr; // Store
   int taken = -1;            // Branch / CondBranch
   int fallthrough = -1;      // CondBranch
+
+  // Branch / CondBranch, when the taken edge leaves the function: the address
+  // it goes to. A tail call is a branch out of the function, and the function
+  // it lands in is the single most useful thing on the line -- so it is carried
+  // here rather than being reduced to "no block", which is what printing `goto
+  // -1` was saying.
+  uint64_t leaves_to = 0;
 };
 
 struct HilBlock {
@@ -119,6 +126,15 @@ struct TokenLine {
   uint64_t addr = 0;
   std::vector<Token> tokens;
   std::vector<std::string> comments;
+
+  // Where control goes from this line, for an interface that draws it. The
+  // tokens say the same thing, but reading it back out of them means parsing
+  // the printed form of a decision that was already made here -- and the
+  // difference between the two edges of a condition is exactly what a reader
+  // wants marked.
+  int taken = -1;         // block id, for a branch
+  int fallthrough = -1;   // block id, for the other edge of a condition
+  uint64_t leaves_to = 0; // an address outside the function, for a tail call
 };
 
 struct TokenBlock {

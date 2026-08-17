@@ -45,8 +45,8 @@ M.limits = {
 -- tokens, so this is a real budget, not a nicety.
 local kCacheBudget = 400
 
--- How many of the oldest entries to drop at once, when the budget is
--- exceeded. Evicting in a batch rather than one-at-a-time means eviction
+-- How many of the least recently used entries to drop at once, when the budget
+-- is exceeded. Evicting in a batch rather than one-at-a-time means eviction
 -- happens rarely instead of on every listing past the budget.
 local kCacheEvict = 200
 
@@ -216,18 +216,41 @@ function Context:ready(addr, options)
   addr = addr or self.addr
   if not addr then return nil end
 
-  local cached = self.cache[cache_key(self, addr, options or {})]
-  if cached and cached.generation == self.generation then return cached.listing end
+  local key = cache_key(self, addr, options or {})
+  local cached = self.cache[key]
+  if cached and cached.generation == self.generation then
+    self:touch(key)
+    return cached.listing
+  end
   return nil
 end
 
--- What a view painted as bytes because the analysis had not reached it yet.
+-- Says a listing has just been read, for the eviction below.
+--
+-- What is worth keeping is what is being looked at, and the order listings were
+-- *made* in says nothing about that: the analysis makes them in address order,
+-- so on a binary with more functions than the budget the one on screen is
+-- evicted for the sake of one nobody has opened -- and the view redraws it as
+-- bytes. Reading one puts it back at the end of the queue.
+function Context:touch(key)
+  self.cached[#self.cached + 1] = key
+end
+
+-- What a view painted as bytes because there was no listing for it.
 --
 -- The background work drains this before its own queue: whatever is on screen
 -- is what someone is waiting for, and the rest of the binary can be analysed
 -- in whatever order it likes.
+--
+-- Asked for whether or not this function has been analysed before, because
+-- those are different questions and the difference is visible: the cache is
+-- bounded, so a function that was analysed an hour and four hundred listings
+-- ago has been evicted, and a view that skipped it here because it was once
+-- analysed would draw it as bytes and then wait for work nobody had queued.
+-- Going somewhere and pressing escape is exactly that sequence. The background
+-- queue still skips what has been analysed; this is only what is on screen.
 function Context:want(addr)
-  if not addr or self.analysed[addr] or self.wanted_set[addr] then return end
+  if not addr or self.wanted_set[addr] then return end
 
   self.wanted_set[addr] = true
   self.wanted[#self.wanted + 1] = addr
@@ -252,7 +275,10 @@ function Context:listing(addr, options)
 
   local key = cache_key(self, addr, options)
   local cached = self.cache[key]
-  if cached and cached.generation == self.generation then return cached.listing end
+  if cached and cached.generation == self.generation then
+    self:touch(key)
+    return cached.listing
+  end
 
   local printer = options.printer or "hil"
   local machine = options.machine
@@ -274,20 +300,82 @@ function Context:listing(addr, options)
   self.cached[#self.cached + 1] = key
 
   -- Analysing a whole binary up front means a listing per function, and a
-  -- listing is a lot of tokens. Keep the recent ones and let the rest go; a
-  -- function that is wanted again is one analysis away.
+  -- listing is a lot of tokens. Keep the ones most recently read and let the
+  -- rest go; a function that is wanted again is one analysis away.
+  --
+  -- `cached` is a log of mentions rather than a set, so a key is in it once per
+  -- time it was made or read. The last mention of each is its age, and the
+  -- entries with nothing but old mentions are the ones nobody has looked at.
   if #self.cached > kCacheBudget then
+    local seen, recent = {}, {}
+    for i = #self.cached, 1, -1 do
+      local key = self.cached[i]
+      if not seen[key] then
+        seen[key] = true
+        recent[#recent + 1] = key -- newest first
+      end
+    end
+
+    local keep = kCacheBudget - kCacheEvict
+    for i = keep + 1, #recent do self.cache[recent[i]] = nil end
+
     local kept = {}
-    for i = kCacheEvict + 1, #self.cached do kept[#kept + 1] = self.cached[i] end
-    for i = 1, kCacheEvict do self.cache[self.cached[i]] = nil end
+    for i = math.min(keep, #recent), 1, -1 do kept[#kept + 1] = recent[i] end
     self.cached = kept
   end
 
   return listing
 end
 
--- Something the user did that the analysis has to be re-run to show: a rename,
--- a comment, a declared type.
+-- Something the user did at one address, rather than everywhere.
+--
+-- Almost every edit is local. Renaming a variable changes one function;
+-- declaring a type changes one function; saying a stretch of bytes is a
+-- function changes that function and the listings that mention it, which are
+-- the ones that refer to it -- and what refers to an address is the one
+-- question the reference index is a map for. Everything else in the binary
+-- reads exactly as it did a moment ago, and throwing those listings away means
+-- analysing the whole image again to redraw a line.
+--
+-- What survives is the point: the map keeps its colours, the background queue
+-- stays empty, and the window comes back on the next frame instead of on the
+-- next sweep.
+function Context:invalidate_at(addr)
+  if not addr then return self:invalidate() end
+
+  local touched = {}
+  local function touch(at)
+    if not at then return end
+    local func = self.session.function_at(at)
+    touched[func and func.addr or at] = true
+  end
+
+  touch(addr)
+  for _, ref in ipairs(self.session.xrefs(addr) or {}) do touch(ref.from) end
+
+  -- The cache is keyed by function, then by how it is being shown, so what has
+  -- to go is every key that begins with one of these addresses.
+  local kept = {}
+  for _, key in ipairs(self.cached) do
+    local base = tonumber(key:match("^(%-?%d+)|"))
+    if base and touched[base] then
+      self.cache[key] = nil
+    else
+      kept[#kept + 1] = key
+    end
+  end
+  self.cached = kept
+
+  -- "Analysed" means "there is a listing for it", so the two go together: the
+  -- map greys these out, and the background queue picks them up again.
+  for base in pairs(touched) do self.analysed[base] = nil end
+
+  self:emit("invalidate")
+  self:emit("refresh")
+end
+
+-- The same thing when the change was not local: a new region, a different
+-- instruction set, a sweep that has just found every function in the image.
 --
 -- Nothing that was analysed still is: the cache is what "analysed" means, and
 -- a function whose listing has been thrown away has to go through the pipeline

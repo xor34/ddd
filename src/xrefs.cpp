@@ -54,6 +54,30 @@ void Xrefs::add(const Cfg &cfg, const std::string &function, uint64_t first,
   }
 }
 
+void Xrefs::forget(uint64_t begin, uint64_t end) {
+  if (end <= begin)
+    return;
+
+  // By `from`, which is not what this is keyed by: what a stretch of bytes
+  // refers to is scattered across the map, one entry per thing referred to.
+  // The alternative is a second index kept in step for the sake of an
+  // operation that happens when somebody presses a key, so this walks.
+  for (auto entry = incoming_.begin(); entry != incoming_.end();) {
+    std::vector<Xref> &refs = entry->second;
+
+    for (auto ref = refs.begin(); ref != refs.end();) {
+      if (ref->from >= begin && ref->from < end) {
+        ref = refs.erase(ref);
+        --count_;
+      } else {
+        ++ref;
+      }
+    }
+
+    entry = refs.empty() ? incoming_.erase(entry) : std::next(entry);
+  }
+}
+
 std::vector<uint64_t> Xrefs::call_targets() const {
   std::vector<uint64_t> targets;
 

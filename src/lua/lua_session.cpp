@@ -171,8 +171,18 @@ void push_strings(lua_State *L, const std::vector<std::string> &values) {
 }
 
 void push_line(lua_State *L, const TokenLine &line) {
-  lua_createtable(L, 0, 3);
+  lua_createtable(L, 0, 6);
   set_number(L, "addr", static_cast<lua_Integer>(line.addr));
+
+  // Only when there is one: every line of every function goes through here, and
+  // three fields that mean "no" on all but the last line of a block is three
+  // more table entries per line to allocate and to read back.
+  if (line.taken >= 0)
+    set_number(L, "taken", line.taken);
+  if (line.fallthrough >= 0)
+    set_number(L, "fallthrough", line.fallthrough);
+  if (line.leaves_to != 0)
+    set_number(L, "leaves", static_cast<lua_Integer>(line.leaves_to));
 
   lua_createtable(L, static_cast<int>(line.tokens.size()), 0);
   for (size_t i = 0; i < line.tokens.size(); ++i) {

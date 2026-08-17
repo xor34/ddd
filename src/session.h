@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <ostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -229,7 +230,23 @@ public:
   // Says the reference index is out of date, without throwing it away: an edit
   // that changes what is code changes what refers to what, but the answers
   // that are already there are better than none while the new ones are built.
+  //
+  // The whole-image version, for a change that could have moved anything: a
+  // new region, or a spec that reads the same bytes differently. An edit to a
+  // stretch of an image already indexed wants `reindex` instead.
   void invalidate_index();
+
+  // Rebuilds the index over one stretch, in place.
+  //
+  // Marking bytes as data, or as code, changes what those bytes refer to and
+  // nothing else -- so the index does not have to be rebuilt, only repaired:
+  // forget what was found there and sweep it again. The index is a map from
+  // address to what refers to it, which is what makes both halves of that
+  // cheap.
+  //
+  // Nothing happens if there is no index yet; the sweep that is building one
+  // will reach this stretch on its own.
+  void reindex(uint64_t begin, uint64_t end);
 
   // Adds one, overriding whatever discovery decided. What a plugin that knows
   // better -- a signature, a prologue scan, a person -- calls.
@@ -389,6 +406,13 @@ private:
   bool indexed_ = false;
   std::vector<uint64_t> starts_; // function starts, once they are known
   size_t start_at_ = 0;
+
+  // Starts that have been through bound_start already. Discovery runs again
+  // every time the references change, and what it costs is a lift per
+  // candidate; this is what keeps that proportional to what the edit touched
+  // rather than to the size of the image. Emptied by invalidate_index(), and
+  // by reindex() over the stretch it repairs.
+  std::set<uint64_t> bounded_;
 
   // A region to sweep from `address`, stopping at the end of whatever
   // instruction-set region it is in.

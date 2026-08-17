@@ -90,7 +90,7 @@ ddd.workflow "studio" {
             if text == "" or text == selection.id then return end
             ui.session.rename_variable(func.addr, selection.id, text)
             ui:status(("%s is now %s"):format(selection.id, text))
-            ui:invalidate()
+            ui:invalidate_at(func.addr)
           end)
         else
           prompt(ui, { title = "Rename function", text = func.name },
@@ -98,7 +98,9 @@ ddd.workflow "studio" {
               if text == "" or text == func.name then return end
               ui.session.rename_function(func.addr, text)
               ui:status(("%s is now %s"):format(func.name, text))
-              ui:invalidate()
+              -- And everything that calls it: the name on a call line is this
+              -- name, and what calls it is what the reference index is for.
+              ui:invalidate_at(func.addr)
             end)
         end
       end,
@@ -117,7 +119,7 @@ ddd.workflow "studio" {
           text = ui.session.comment(addr) or "",
         }, function(text)
           ui.session.set_comment(addr, text)
-          ui:invalidate()
+          ui:invalidate_at(addr)
         end)
       end,
     }
@@ -140,7 +142,7 @@ ddd.workflow "studio" {
         }, function(text)
           if text == "" then return end
           ui.session.set_type(func.addr, selection.id, text)
-          ui:invalidate()
+          ui:invalidate_at(func.addr)
         end)
       end,
     }
@@ -190,7 +192,7 @@ ddd.workflow "studio" {
           local written = ddd.signature_from_lines(text)
           ui.session.set_signature(func.addr, written)
           ui:status(written == "" and "signature cleared" or written)
-          ui:invalidate()
+          ui:invalidate_at(func.addr)
         end)
       end,
     }
@@ -234,7 +236,7 @@ ddd.workflow "studio" {
 
         ui:status(("undefined the %s at %s -- u again for what it was in")
           :format(kind, ddd.format.addr(addr)))
-        ui:invalidate()
+        ui:invalidate_at(addr)
       end,
     }
 
@@ -259,7 +261,7 @@ ddd.workflow "studio" {
 
         ui:status(("code %s-%s"):format(ddd.format.addr(addr),
                                         ddd.format.addr(ends)))
-        ui:invalidate()
+        ui:invalidate_at(addr)
       end,
     }
 
@@ -281,7 +283,7 @@ ddd.workflow "studio" {
         ui:status(("%s  %s-%s"):format(func and func.name or "function",
                                        ddd.format.addr(addr),
                                        ddd.format.addr(ends)))
-        ui:invalidate()
+        ui:invalidate_at(addr)
       end,
     }
 
@@ -301,7 +303,7 @@ ddd.workflow "studio" {
         ui:status(("string of %d byte%s at %s"):format(size,
                                                        size == 1 and "" or "s",
                                                        ddd.format.addr(addr)))
-        ui:invalidate()
+        ui:invalidate_at(addr)
       end,
     }
 
@@ -335,7 +337,7 @@ ddd.workflow "studio" {
 
           ui:status(("%s %s at %s"):format(region.kind, region.name,
                                            ddd.format.addr(region.addr)))
-          ui:invalidate()
+          ui:invalidate_at(region.addr)
         end)
       end,
     }
@@ -364,7 +366,7 @@ ddd.workflow "studio" {
           ui.session.define_data(addr, last)
           ui:status(("%s-%s is data"):format(ddd.format.addr(addr),
                                              ddd.format.addr(last)))
-          ui:invalidate()
+          ui:invalidate_at(addr)
         end)
       end,
     }

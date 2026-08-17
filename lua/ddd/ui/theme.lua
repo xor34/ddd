@@ -32,6 +32,14 @@ M.colour = {
   landed      = "#2f5d8a", -- where a jump came out, for a moment
 
   warning     = "#e5a04a",
+
+  -- The two edges of a decision, in the colours every disassembler has used
+  -- for them: the condition holding is green, it not holding is red. An
+  -- unconditional jump is neither -- nothing was decided -- so it is drawn in
+  -- the same blue as everything else that is merely structure.
+  flow_taken  = "#7cc36e",
+  flow_other  = "#d9605c",
+  flow_jump   = "#5c8bbf",
 }
 
 -- One colour per token kind, which is what `tokenize` hands out: var, const,
@@ -48,6 +56,10 @@ M.token = {
   label     = "#98c379",
   xref      = "#7f8896",
   string    = "#98c379",
+  -- Somewhere this function does not contain: the destination of a tail call,
+  -- or of a jump into the middle of a neighbour. Warm, because leaving the
+  -- function is the thing about the line worth noticing.
+  extern    = "#e5a04a",
   ["function"] = "#61afef",
 }
 

@@ -280,6 +280,13 @@ Session::Bounded Session::bound_start(size_t index, int slot) const {
   Bounded bounded;
   const uint64_t address = starts_[index];
 
+  // Already bounded, and nothing has happened to these bytes since it was.
+  // Discovery runs again whenever the references change -- a call nobody had
+  // decoded is a function nobody had found -- and without this that means
+  // lifting every function in the image to be told what it already knew.
+  if (bounded_.count(address) != 0)
+    return bounded;
+
   const Region *region = nullptr;
   for (const Region &candidate : regions_)
     if (address >= candidate.begin && address < candidate.end)
@@ -346,8 +353,11 @@ void Session::invalidate_index() {
   indexed_ = false;
 
   // Function discovery rests on the index, so it is out of date too -- but the
-  // functions already found stay until better ones replace them.
+  // functions already found stay until better ones replace them. Every extent
+  // is a candidate again: this is the version for a change that could have
+  // moved anything.
   discovered_ = false;
+  bounded_.clear();
 }
 
 // How many threads this step gets, and asking for what they need.
@@ -391,6 +401,59 @@ void Session::in_parallel(
     return;
   }
   pool_->run(count, body, slots);
+}
+
+void Session::reindex(uint64_t begin, uint64_t end) {
+  if (xrefs_ == nullptr || end <= begin)
+    return;
+
+  xrefs_->forget(begin, end);
+
+  for (const Region &region : regions_) {
+    if (region.target == nullptr)
+      continue;
+
+    const uint64_t from = std::max(begin, region.begin);
+    const uint64_t to = std::min(end, region.end);
+    if (to <= from)
+      continue;
+
+    // The same run-up the chunked sweep takes, and for the same reason: on an
+    // instruction set of varying length, starting in the middle of the stretch
+    // means starting in the middle of an instruction until the decoder falls
+    // back into step. What it reads before `from` is not reported.
+    const uint64_t resync =
+        region.target->translator->getAlignment() > 1 ? 0 : kResync;
+    const uint64_t at =
+        from > region.begin ? std::max(region.begin, from - resync) : from;
+
+    Region slice = region;
+    slice.begin = at;
+    slice.end = to;
+
+    if (std::unique_ptr<Lifted> lifted =
+            lift(slice, at, static_cast<int>(to - at), image_,
+                 /*disassemble=*/false))
+      xrefs_->add(lifted->cfg, "", from, to, region.begin, region.end);
+  }
+
+  // A function that runs into the stretch may end somewhere else now, so it
+  // goes back on the list as well as anything starting inside it.
+  uint64_t first = begin;
+  if (auto it = found_.upper_bound(begin); it != found_.begin()) {
+    --it;
+    if (it->second.end > begin)
+      first = it->first;
+  }
+  bounded_.erase(bounded_.lower_bound(first), bounded_.lower_bound(end));
+
+  // What the references say about where the functions are has changed with
+  // them: a call nobody had decoded before is a function nobody had found.
+  // Discovery runs again over the new list, and skips everything on it that is
+  // already bounded -- which after an edit is all of it but the few addresses
+  // this just forgot.
+  collect_starts();
+  discovered_ = false;
 }
 
 Session::AnalysisStep Session::analyse_step(int budget) {
@@ -515,8 +578,10 @@ Session::AnalysisStep Session::analyse_step(int budget) {
     });
 
     for (const Bounded &one : bounded)
-      if (one.ok)
+      if (one.ok) {
         define_function(one.address, one.end, one.name);
+        bounded_.insert(one.address);
+      }
     start_at_ += count;
 
     step.done = start_at_;
@@ -948,7 +1013,7 @@ std::string Session::undefine_at(uint64_t address, int levels) {
     image_->unmark_data(begin, finish);
     project_.unmark_data(begin, finish);
     project_.remove_marks(begin, finish);
-    invalidate_index();
+    reindex(begin, finish);
 
   } else {
     tree_.remove(id);
@@ -1028,7 +1093,7 @@ void Session::clear_data_over(uint64_t begin, uint64_t end) {
     }
   }
 
-  invalidate_index();
+  reindex(begin, end);
 }
 
 uint64_t Session::define_code(uint64_t address) {
@@ -1200,7 +1265,9 @@ void Session::define_data(uint64_t begin, uint64_t end) {
   tree_.set_user_defined(id, true);
   tree_.clear_children(id);
 
-  invalidate_index();
+  // Only what those bytes referred to has changed, and they refer to nothing
+  // now: the disassembler will not read them at all.
+  reindex(begin, end);
 
   save_project();
 }

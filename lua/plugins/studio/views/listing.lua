@@ -81,6 +81,13 @@ local function make_tags(buffer, theme)
   tag("highlight", { background = theme.colour.highlight,
                      underline = gtk.Pango.Underline.SINGLE })
 
+  -- The two edges out of a condition, and a jump that is not a decision at
+  -- all. These colour the arrows in the gutter and the target on the line, so
+  -- that the same edge is the same colour in both places.
+  tag("flow_taken", { foreground = theme.colour.flow_taken })
+  tag("flow_other", { foreground = theme.colour.flow_other })
+  tag("flow_jump", { foreground = theme.colour.flow_jump })
+
   -- The line the cursor is on, which is not the same as what is on screen:
   -- scrolling moves the view, j and k move the cursor, and the two only meet
   -- when the cursor would otherwise go out of sight. The faintest lift that
@@ -293,6 +300,124 @@ end
 
 function Painter:text() return table.concat(self.parts) end
 
+-- ---- the arrows ----------------------------------------------------------
+--
+-- Where control goes, drawn down the left of the listing the way every
+-- disassembler since the eighties has drawn it.
+--
+-- A linear listing prints blocks one after another and leaves the reader to
+-- reconstruct the shape from the labels: `goto loc_4004c8` is a name, and
+-- finding out whether that is a loop back or a skip forward means reading until
+-- you find it. The arrow says it before you have read anything -- which way it
+-- goes, how far, and whether it is the branch being taken or the branch being
+-- fallen past.
+--
+-- The colours are IDA's, and they are the reason this is worth the gutter it
+-- costs: green is the edge taken when the condition holds, red is the edge
+-- taken when it does not, and blue is a jump that decided nothing.
+
+-- One column per arrow that can be in flight at once, and one more for the
+-- head, which is always against the code.
+local kLanes = 3
+local kGutter = kLanes + 1
+local kBlank = string.rep(" ", kGutter)
+
+-- Lane one is nearest the code, so the shortest jump -- the one most likely to
+-- be the one being read -- is the one drawn closest to the line it leaves.
+local function lane_column(lane) return kGutter - 1 - lane end
+
+local kFlowTag = { taken = "flow_taken", other = "flow_other", jump = "flow_jump" }
+
+local function draw_arrows(paint, gutters, jumps)
+  if #jumps == 0 then return end
+
+  table.sort(jumps, function(a, b)
+    return math.abs(a.to - a.from) < math.abs(b.to - b.from)
+  end)
+
+  local chars, tags = {}, {}
+
+  local function set(line, column, char, tag)
+    chars[line] = chars[line] or {}
+    tags[line] = tags[line] or {}
+
+    -- Two arrows meeting in one cell: a horizontal crossing a vertical is a
+    -- crossing rather than a break in either of them, and a corner belongs to
+    -- the arrow that turns there, so it is never overwritten.
+    local there = chars[line][column]
+    if there and char == "│" then return end
+    if there == "│" and char == "─" then char = "┼" end
+
+    chars[line][column] = char
+    tags[line][column] = tag
+  end
+
+  -- Which rows each lane is busy over, so two arrows never share a column.
+  local busy = {}
+  for lane = 1, kLanes do busy[lane] = {} end
+
+  for _, jump in ipairs(jumps) do
+    local top = math.min(jump.from, jump.to)
+    local bottom = math.max(jump.from, jump.to)
+
+    -- The innermost free lane, or the outermost one when a function has more
+    -- arrows in flight than there are lanes: crossing there is better than
+    -- silently not drawing the arrow at all.
+    local lane = kLanes
+    for candidate = 1, kLanes do
+      local free = true
+      for line = top, bottom do
+        if busy[candidate][line] then
+          free = false
+          break
+        end
+      end
+      if free then
+        lane = candidate
+        break
+      end
+    end
+    for line = top, bottom do busy[lane][line] = true end
+
+    local column = lane_column(lane)
+    local tag = kFlowTag[jump.kind]
+    local down = jump.to > jump.from
+
+    for line = top + 1, bottom - 1 do set(line, column, "│", tag) end
+    set(jump.from, column, down and "┌" or "└", tag)
+    set(jump.to, column, down and "└" or "┌", tag)
+
+    -- Out to the code on both ends; only the far end gets a head.
+    for at = column + 1, kGutter - 1 do
+      set(jump.from, at, "─", tag)
+      set(jump.to, at, at == kGutter - 1 and "▸" or "─", tag)
+    end
+  end
+
+  -- Into the blanks that were painted in their place. Every cell is one
+  -- character wide and the gutter keeps its width, so every offset recorded
+  -- while painting -- which is what a click and a highlight are looked up by --
+  -- still describes the same text.
+  for line, row in pairs(chars) do
+    local gutter = gutters[line]
+    if gutter then
+      local text = {}
+      for column = 0, kGutter - 1 do text[#text + 1] = row[column] or " " end
+      paint.parts[gutter.index] = table.concat(text)
+
+      for column = 0, kGutter - 1 do
+        if row[column] then
+          paint.marks[#paint.marks + 1] = {
+            tag = tags[line][column],
+            from = gutter.from + column,
+            to = gutter.from + column + 1,
+          }
+        end
+      end
+    end
+  end
+end
+
 -- An address anywhere in a token is somewhere you might want to go: a call
 -- destination, a jump target, a pointer into data. Tokens do not carry one, so
 -- it is read back out of the text -- which is exactly as approximate as it
@@ -441,6 +566,10 @@ function View:render(from, to, focus)
   self.pending = {}
   self.span = { from = from, to = to }
 
+  -- Offsets into the buffer that is about to be replaced. The cursor is placed
+  -- again once this has been painted, which is what puts a real one back.
+  self.selected_range = nil
+
   -- Whether to make the analysis happen or to draw what has already happened.
   -- Only the smoke modes make it happen: they have no main loop, so nothing
   -- would ever come along and turn the bytes into code.
@@ -476,6 +605,7 @@ function View:render(from, to, focus)
         self.lines[paint.line] = { addr = item.func.addr }
         self:mark_line(item.func.addr, paint.line)
 
+        paint:put(kBlank)
         paint:put(item.func.name, "heading")
         paint:put(("  0x%x  %s"):format(item.func.addr, listing.error or "?"),
                   "comment")
@@ -563,6 +693,11 @@ function View:paint_bytes(paint, from, to, options)
   -- than on the title above them. (When the dump starts further in, nothing
   -- else can claim it, and the marker below takes it instead.)
   self.lines[paint.line] = { addr = from }
+  -- The same blank gutter the code is painted with, so the address column is
+  -- in one place down the whole listing rather than stepping in and out at
+  -- every function boundary. Nothing is ever drawn in it here: bytes have no
+  -- control flow, which is the reason they are being shown as bytes.
+  paint:put(kBlank)
   paint:put(label, "heading")
   paint:put(("  0x%x-0x%x  %d byte%s"):format(from, to, size,
                                               size == 1 and "" or "s"),
@@ -588,6 +723,7 @@ function View:paint_bytes(paint, from, to, options)
     local row = bytes:sub(offset + 1, offset + 16)
 
     self:mark_line(start + offset, paint.line)
+    paint:put(kBlank)
     paint:put(("  %08x  "):format(start + offset), "address")
 
     -- Every byte is addressable, and none of them is a table.
@@ -636,6 +772,7 @@ function View:paint_bytes(paint, from, to, options)
       target = start + shown,
       tokens = { { column = 0, width = math.huge, addr = start + shown } },
     }
+    paint:put(kBlank)
     paint:put(("  ... %d more byte%s"):format(after, after == 1 and "" or "s"),
               "comment")
     paint:newline()
@@ -645,6 +782,21 @@ function View:paint_bytes(paint, from, to, options)
 end
 
 function View:paint_function(paint, listing, info)
+  -- The gutter the arrows are drawn in.
+  --
+  -- Painted blank and filled in at the end, because an arrow is not known when
+  -- the line it leaves is painted: a forward jump names a block that has not
+  -- been reached yet, and its line number is the thing being drawn. Blanks of
+  -- the right width now and the same width of box-drawing after keeps every
+  -- offset the painter recorded meanwhile.
+  local gutters, jumps, line_of_block = {}, {}, {}
+
+  local function gutter()
+    local index = #paint.parts + 1
+    local from = paint:put(kBlank)
+    gutters[paint.line] = { index = index, from = from }
+  end
+
   -- A heading, because in a linear listing the thing you most need to know is
   -- which function you have scrolled into.
   --
@@ -654,6 +806,7 @@ function View:paint_function(paint, listing, info)
   -- call to one finds no line for the address it was told to go to.
   self.lines[paint.line] = { addr = listing.addr, signature = true }
   self:mark_line(listing.addr, paint.line)
+  gutter()
 
   -- The prototype is the heading, when there is one. It is the most useful
   -- line about a function -- what it takes and what it gives back -- and
@@ -704,6 +857,10 @@ function View:paint_function(paint, listing, info)
     self.lines[paint.line] = { addr = block.addr }
     self:mark_line(block.addr, paint.line)
 
+    -- Where an arrow into this block has to land.
+    line_of_block[block.id] = paint.line
+    gutter()
+
     if block.entry then
       paint:put(("%s:"):format(listing.name), "label")
     else
@@ -728,6 +885,7 @@ function View:paint_function(paint, listing, info)
       if interesting and shown >= limit then interesting = false end
       if interesting then
         shown = shown + 1
+        gutter()
         paint:put("  ; ", "xref")
         paint:put(("%s from "):format(ref.kind), "xref")
         local from, to = paint:put(("0x%x"):format(ref.from), "xref")
@@ -745,6 +903,7 @@ function View:paint_function(paint, listing, info)
 
     if wanted > shown then
       self.lines[paint.line] = { addr = block.addr }
+      gutter()
       paint:put(("  ; ... %d more reference(s); x to list them")
         :format(wanted - shown), "xref")
       paint:newline()
@@ -754,6 +913,7 @@ function View:paint_function(paint, listing, info)
       -- The prototype is the heading now; saying it twice is just noise. The
       -- text listing still wants the comment, which is why the pass emits it.
       if not (block.entry and comment:sub(1, 11) == "signature: ") then
+        gutter()
         paint:put("  ; " .. comment, "comment")
         self.lines[paint.line] = { addr = block.addr }
         paint:newline()
@@ -764,13 +924,27 @@ function View:paint_function(paint, listing, info)
       -- The comment above the line it is about, so a long one does not push
       -- the code off the side of the window.
       for _, comment in ipairs(line.comments) do
+        gutter()
         paint:put(("%s; %s"):format(string.rep(" ", 14), comment), "comment")
         self.lines[paint.line] = { addr = line.addr }
         paint:newline()
       end
 
       local record = { addr = line.addr, tokens = {} }
+      gutter()
       paint:put(("  %08x  "):format(line.addr), "address")
+
+      -- What leaves this line, for the gutter. The block it names is resolved
+      -- to a line once the whole function is painted: a forward jump is the
+      -- common case and its target does not exist yet.
+      if line.taken then
+        jumps[#jumps + 1] = { from = paint.line, block = line.taken,
+                              kind = line.fallthrough and "taken" or "jump" }
+      end
+      if line.fallthrough then
+        jumps[#jumps + 1] = { from = paint.line, block = line.fallthrough,
+                              kind = "other" }
+      end
 
       local previous, earlier
       for _, token in ipairs(line.tokens) do
@@ -780,16 +954,34 @@ function View:paint_function(paint, listing, info)
         -- the page; nothing but this view knows what to call it.
         local text = token.s
         local target = nil
+        local kind = self.tags[token.k] and token.k or "default"
+
         if token.k == "block" then
           local id = tonumber(token.s)
           text = (id and labels[id]) or ("block " .. token.s)
           target = id and targets[id] or nil
+          kind = "label"
+
+          -- The two edges of a condition, in the colours their arrows are
+          -- drawn in: which way the listing carries on is the whole question a
+          -- conditional branch asks, and answering it in the same green and
+          -- red in both places is what makes the arrow readable at a glance.
+          if id and id == line.taken then
+            kind = line.fallthrough and "flow_taken" or "flow_jump"
+          elseif id and id == line.fallthrough then
+            kind = "flow_other"
+          end
+
+        elseif token.k == "extern" and line.leaves then
+          -- Somewhere this function does not contain: a tail call, or a jump
+          -- into a neighbour. The address is what the analysis knows; the name
+          -- is what the reader wants, and going there has to work from here.
+          local func = self.ui.session.function_at(line.leaves)
+          text = (func and func.name) or token.s
+          target = line.leaves
         end
 
         local column = paint.column
-        local kind = self.tags[token.k] and token.k or "default"
-        if token.k == "block" then kind = "label" end
-
         local at_from, at_to = paint:put(text, kind)
 
         local entry = {
@@ -821,6 +1013,20 @@ function View:paint_function(paint, listing, info)
     end
   end
 
+  -- Now that every block has a line, the arrows can be drawn. A jump to a
+  -- block that was not printed -- one nothing can reach, which the tokeniser
+  -- leaves out -- has nowhere to point and is dropped; an edge to the line
+  -- immediately below is what falling through already looks like, and an arrow
+  -- saying so is a lane spent on nothing.
+  local resolved = {}
+  for _, jump in ipairs(jumps) do
+    local to = line_of_block[jump.block]
+    if to and math.abs(to - jump.from) > 1 then
+      resolved[#resolved + 1] = { from = jump.from, to = to, kind = jump.kind }
+    end
+  end
+  draw_arrows(paint, gutters, resolved)
+
   paint:newline()
 end
 
@@ -836,8 +1042,13 @@ function View:settle()
   local ui = self.ui
   local turned = false
 
+  -- Whether there is a listing now, rather than whether one was ever made.
+  -- The two came apart when the cache started evicting: a function analysed
+  -- long enough ago has been dropped, and asking the wrong question there
+  -- means redrawing bytes as bytes for as long as the analysis keeps
+  -- reporting.
   for addr in pairs(self.pending) do
-    if ui.analysed[addr] then
+    if ui:ready(addr, { printer = self.printer }) then
       turned = true
       break
     end
@@ -1248,9 +1459,18 @@ function View:select(token, line, options)
 
   self.selected_id = token and token.id or nil
   self.selected_column = token and token.column or nil
-  -- A byte has no identity to match elsewhere, so the highlight is just that
-  -- byte -- which is what tells you which one you are about to mark.
-  self.selected_range = (not self.selected_id and token and token.at and token.from)
+
+  -- Whatever the cursor is on, whether or not it is a name.
+  --
+  -- Highlighting only the things that appear elsewhere -- a variable, which
+  -- has an identity to match on -- means that moving along a line with `w`
+  -- goes dark the moment it reaches a constant, an operator or a label, and
+  -- the cursor is then somewhere the reader cannot see. It is the same
+  -- question in every case: where am I. So the range under the cursor is
+  -- always marked, and the occurrences of a name are marked as well as it
+  -- rather than instead of it.
+  self.selected_range = (token and token.from and token.to
+                         and token.to > token.from)
     and { from = token.from, to = token.to } or nil
   self:highlight(self.selected_id)
 
@@ -1281,19 +1501,19 @@ function View:highlight(id)
   buffer:remove_tag(self.tags.highlight, buffer:get_start_iter(),
                     buffer:get_end_iter())
 
-  if not id then
-    local range = self.selected_range
-    if range then
-      buffer:apply_tag(self.tags.highlight,
-                       buffer:get_iter_at_offset(range.from),
-                       buffer:get_iter_at_offset(range.to))
-    end
-    return
+  local function mark(from, to)
+    buffer:apply_tag(self.tags.highlight, buffer:get_iter_at_offset(from),
+                     buffer:get_iter_at_offset(to))
   end
 
+  -- Where the cursor is, first: the one thing this must never fail to show.
+  local range = self.selected_range
+  if range then mark(range.from, range.to) end
+
+  if not id then return end
+
   for _, place in ipairs(self.by_id[id] or {}) do
-    buffer:apply_tag(self.tags.highlight, buffer:get_iter_at_offset(place.from),
-                     buffer:get_iter_at_offset(place.to))
+    mark(place.from, place.to)
   end
 end
 

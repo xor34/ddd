@@ -47,6 +47,17 @@ struct BasicBlock {
   bool ends_in_return = false;
   bool ends_in_branch = false;
 
+  // Where this block's branch goes when no block here covers it: a tail call,
+  // or a jump into the middle of a neighbour. There is no successor to record
+  // -- the destination is not part of this function -- but the address is
+  // known, and it is the whole content of the instruction. Without it the
+  // branch is a dead end that everything downstream has to describe as one,
+  // which is how a tail call ends up printed as `goto -1`.
+  //
+  // Zero when the block does not end in a branch, or when the destination is
+  // computed (a jump table) and there is nothing static to say.
+  uint64_t leaves_to = 0;
+
   const PcodeOp *terminator() const {
     return ops.empty() ? nullptr : &ops.back();
   }

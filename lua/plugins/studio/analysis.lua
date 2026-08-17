@@ -81,8 +81,36 @@ function M.start(ui)
   -- of functions changes.
   local queue, at = {}, 1
 
+  -- What the last refill saw, address -> where that function ended.
+  --
+  -- Discovery runs again whenever the references change, and it mostly finds
+  -- what it found last time. The interesting case is the one function it did
+  -- not: a new function inside an old one takes its bytes, so the listing that
+  -- was drawn for the old one now runs through the middle of somebody else and
+  -- has to go. Everything else in the image is unaffected, and this is how it
+  -- stays that way.
+  local known = {}
+
+  local function notice(functions)
+    for _, func in ipairs(functions) do
+      if not known[func.addr] then
+        for addr, ends in pairs(known) do
+          if addr < func.addr and ends > func.addr then ui:invalidate_at(addr) end
+        end
+      end
+    end
+
+    known = {}
+    for _, func in ipairs(functions) do
+      known[func.addr] = func.addr + func.size
+    end
+  end
+
   local function refill()
     queue, at = {}, 1
+
+    local functions = ui.session.functions()
+    notice(functions)
 
     local here = ui.focus or ui.addr
     local first = here and ui.session.function_at(here)
@@ -90,7 +118,7 @@ function M.start(ui)
       queue[#queue + 1] = first.addr
     end
 
-    for _, func in ipairs(ui.session.functions()) do
+    for _, func in ipairs(functions) do
       if not ui.analysed[func.addr]
          and not (first and func.addr == first.addr) then
         queue[#queue + 1] = func.addr
@@ -100,6 +128,7 @@ function M.start(ui)
 
   local sweeping = true
   ui.sweeping = true
+
 
   GLib.timeout_add(GLib.PRIORITY_LOW, 16, function()
     -- Whatever the user just did comes first. This is a single thread: the
@@ -115,14 +144,14 @@ function M.start(ui)
     -- into `sweeping` -- the index it invalidated has to be rebuilt, and the
     -- one already there answers questions meanwhile.
     --
-    -- Nothing is lifted while this runs, however much someone is looking at it.
-    -- A function analysed before the index exists is analysed without it: no
-    -- references at its label, no idea what the calls in it are calls to, names
-    -- that come from nowhere. And it does not survive either -- finishing the
-    -- sweep invalidates every listing computed against what was there before,
-    -- because that is what invalidating is for. So lifting here buys a worse
-    -- reading of one function, twice, and it does it by taking time away from
-    -- the sweep that everything else is waiting on. Bytes until it is done.
+    -- Nothing is lifted while the first one runs, however much someone is
+    -- looking at it. A function analysed before the index exists is analysed
+    -- without it: no references at its label, no idea what the calls in it are
+    -- calls to, names that come from nowhere. And it does not survive either --
+    -- the index arriving is what throws those listings away. So lifting there
+    -- buys a worse reading of one function, twice, and it does it by taking
+    -- time away from the sweep everything else is waiting on. Bytes until it
+    -- is done.
     if sweeping then
       local step
       repeat
@@ -134,9 +163,21 @@ function M.start(ui)
 
       sweeping = false
       ui.sweeping = false
-      ui:invalidate()
+
+      -- The first index is the only one that invalidates anything wholesale,
+      -- and it does it because nothing drawn before it existed had references
+      -- in it. Every sweep after that is a repair: the index is a map from
+      -- address to what refers to it, an edit puts back the stretch it changed,
+      -- and what that costs is the listings of the functions actually involved
+      -- -- which `refill` throws away one at a time. Discovering a function is
+      -- not a reason to analyse a binary again.
+      if not ui.indexed then
+        ui.indexed = true
+        ui:invalidate()
+      end
+
       refill()
-      announce("analysing", 0, #queue)
+      if #queue > 0 then announce("analysing", 0, #queue) end
       return true
     end
 
@@ -192,8 +233,18 @@ function M.start(ui)
     refill()
     if #queue > 0 then return true end
 
+    -- Starting over is not free -- it goes back through the sweeping phase,
+    -- and while that runs the views draw bytes -- so the poll only does it
+    -- when there is something to do: an edit, which invalidates the index and
+    -- which analyse_step reports by not being finished; a view asking for
+    -- something it drew as bytes; or an invalidation, which puts every
+    -- function back into the queue. Otherwise it keeps polling.
     GLib.timeout_add(GLib.PRIORITY_LOW, kIdlePoll, function()
-      sweeping = true
+      if ui.session.analyse_step(1).finished and #ui.wanted == 0 then
+        refill()
+        if #queue == 0 then return true end
+      end
+
       M.start(ui)
       return false
     end)

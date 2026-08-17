@@ -244,6 +244,16 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
       long long target = resolve_target(sweep, range.end - 1, last.inputs[0]);
       return target < 0 ? -1 : block_of_op(static_cast<size_t>(target));
     };
+    // The address a branch names when this sweep does not contain it. An
+    // absolute destination is an address whether or not it was swept -- a tail
+    // call is exactly this, and so is a jump into the function next door -- and
+    // only a p-code-relative one (an intra-instruction branch, which cannot
+    // leave the instruction) has nothing to say here.
+    auto leaves_to = [&]() -> uint64_t {
+      if (last.inputs.empty() || is_constant(last.inputs[0]))
+        return 0;
+      return static_cast<uint64_t>(last.inputs[0].offset);
+    };
 
     switch (last.opc) {
     case ghidra::CPUI_RETURN:
@@ -254,12 +264,16 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
       block.ends_in_branch = true;
       if (int t = branch_target(); t >= 0)
         block.succs.push_back({t, false});
+      else
+        block.leaves_to = leaves_to();
       break;
 
     case ghidra::CPUI_CBRANCH:
       block.ends_in_branch = true;
       if (int t = branch_target(); t >= 0)
         block.succs.push_back({t, true});
+      else
+        block.leaves_to = leaves_to();
       if (int f = fallthrough(); f >= 0)
         block.succs.push_back({f, false});
       break;
@@ -305,6 +319,8 @@ std::string to_string(const Cfg &cfg) {
       os << " return";
     if (block.ends_in_branch)
       os << " branch";
+    if (block.leaves_to != 0)
+      os << " leaves 0x" << std::hex << block.leaves_to << std::dec;
     os << "\n";
 
     uint64_t shown = ~uint64_t(0);

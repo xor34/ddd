@@ -40,6 +40,15 @@ public:
            uint64_t to = UINT64_MAX, uint64_t inside_begin = 0,
            uint64_t inside_end = 0);
 
+  // Drops everything found in one stretch of the image.
+  //
+  // What an edit changes is what the bytes it covers refer to, and this is a
+  // map from address to what refers to it -- so the repair is `forget` the
+  // stretch and `add` it back as it now reads. Rebuilding the index for the
+  // whole image is minutes of work on a real binary, and it was the reason
+  // marking sixteen bytes as data cost a re-analysis of everything.
+  void forget(uint64_t begin, uint64_t end);
+
   // References *to* an address, in the order they were found.
   const std::vector<Xref> &to(uint64_t address) const;
 
