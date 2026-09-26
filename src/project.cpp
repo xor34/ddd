@@ -111,6 +111,19 @@ void Project::add_region(RegionSpec region) {
   regions_.push_back(std::move(region));
 }
 
+void Project::add_object(Object object) {
+  if (object.path.empty())
+    return;
+
+  // The same file at the same address twice is one object; the same file at a
+  // different address is two, because that is a thing firmware does.
+  for (const Object &existing : objects_)
+    if (existing.path == object.path && existing.at == object.at)
+      return;
+
+  objects_.push_back(std::move(object));
+}
+
 void Project::add_mark(Mark mark) {
   if (mark.end <= mark.begin)
     return;
@@ -135,7 +148,8 @@ void Project::remove_marks(uint64_t begin, uint64_t end) {
 bool Project::empty() const {
   return functions_.empty() && variables_.empty() && comments_.empty() &&
          types_.empty() && signatures_.empty() && data_.empty() &&
-         undefined_.empty() && regions_.empty() && marks_.empty();
+         undefined_.empty() && regions_.empty() && objects_.empty() &&
+         marks_.empty() && entry_ == 0;
 }
 
 bool Project::load(const std::string &path) {
@@ -186,11 +200,31 @@ bool Project::load(const std::string &path) {
       uint64_t value = 0;
       if (!read_address(fields, path, number, value)) continue;
       undefine_function(value);
+    } else if (verb == "entry") {
+      uint64_t value = 0;
+      if (!read_address(fields, path, number, value)) continue;
+      entry_ = value;
+
+    } else if (verb == "object") {
+      Object object;
+      std::string at;
+      fields >> object.path >> at;
+      if (object.path.empty() || !parse_number(at, object.at)) {
+        std::cerr << path << ":" << number << ": bad object\n";
+        continue;
+      }
+      add_object(std::move(object));
+
     } else if (verb == "region") {
       RegionSpec region;
       std::string begin, end;
       fields >> begin >> end >> region.spec >> region.abi >>
           region.stack_pointer;
+
+      // Whatever is left on the line is context: `longMode=1 addrsize=2`.
+      for (std::string setting; fields >> setting;)
+        if (setting.find('=') != std::string::npos)
+          region.context.push_back(setting);
       if (!parse_number(begin, region.begin) ||
           !parse_number(end, region.end) || region.spec.empty()) {
         std::cerr << path << ":" << number << ": bad region\n";
@@ -244,10 +278,18 @@ bool Project::save(const std::string &path) const {
   for (const Mark &mark : marks_)
     file << "mark " << hex(mark.begin) << " " << hex(mark.end) << " "
          << mark.kind << " " << mark.name << "\n";
-  for (const RegionSpec &region : regions_)
+  if (entry_ != 0)
+    file << "entry " << hex(entry_) << "\n";
+  for (const Object &object : objects_)
+    file << "object " << object.path << " " << hex(object.at) << "\n";
+  for (const RegionSpec &region : regions_) {
     file << "region " << hex(region.begin) << " " << hex(region.end) << " "
          << region.spec << " " << (region.abi.empty() ? "-" : region.abi) << " "
-         << (region.stack_pointer.empty() ? "-" : region.stack_pointer) << "\n";
+         << (region.stack_pointer.empty() ? "-" : region.stack_pointer);
+    for (const std::string &setting : region.context)
+      file << " " << setting;
+    file << "\n";
+  }
 
   return true;
 }

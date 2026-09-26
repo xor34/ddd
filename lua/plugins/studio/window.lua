@@ -14,37 +14,17 @@ local ddd = require "ddd"
 local Gtk, Gdk = gtk.Gtk, gtk.Gdk
 
 require "plugins.studio.commands"
+require "plugins.studio.options"
 require "plugins.studio.views.functions"
 require "plugins.studio.views.listing"
+require "plugins.studio.views.graph"
 require "plugins.studio.views.ssa"
 require "plugins.studio.views.data"
 require "plugins.studio.views.map"
 
 -- ---- keys ----------------------------------------------------------------
 
-local function modifier(state, name)
-  if state == nil then return false end
-  if type(state) == "table" then return state[name] == true end
-
-  local mask = Gdk.ModifierType[name]
-  mask = tonumber(mask) or 0
-  return (state & mask) ~= 0
-end
-
--- "<control>q", "<alt>Left", "semicolon", "g" -- the shape GTK writes
--- accelerators in, without pulling in the accelerator machinery, which wants
--- actions rather than a table of closures.
-local function matches(accelerator, name, state)
-  local wanted = {}
-  local key = accelerator:gsub("<(%a+)>", function(found)
-    wanted[found:lower()] = true
-    return ""
-  end)
-
-  if (wanted.control or false) ~= modifier(state, "CONTROL_MASK") then return false end
-  if (wanted.alt or false) ~= modifier(state, "ALT_MASK") then return false end
-  return key:lower() == (name or ""):lower()
-end
+local matches = gtk.accelerator
 
 -- ---- the command palette -------------------------------------------------
 
@@ -217,7 +197,21 @@ local function build(ui, app)
   ui:on("navigate", function(_, addr) place.label = breadcrumb(addr) end)
   ui:on("invalidate", function() place.label = breadcrumb(ui.focus or ui.addr) end)
   ui:on("select", function(_, addr) place.label = breadcrumb(addr) end)
-  ui:on("show", function(_, name) stack:set_visible_child_name(name) end)
+  -- Which page is up, for the commands that toggle between two of them. Kept
+  -- from both ends: a command switching pages says so, and the switcher in the
+  -- header is a click nothing else hears about.
+  ui.page = ddd.ui.views_at("main")[1] and ddd.ui.views_at("main")[1].name
+
+  ui:on("show", function(_, name)
+    ui.page = name
+    stack:set_visible_child_name(name)
+  end)
+
+  pcall(function()
+    stack.on_notify["visible-child-name"] = function()
+      ui.page = stack:get_visible_child_name()
+    end
+  end)
   ui:on("quit", function() window:close() end)
 
   -- One controller for every command that named a key. A view that wants a key
@@ -338,6 +332,7 @@ function M.open(ui)
 
       if listing and mode == "click" then
         io.write(listing:probe(), "\n")
+        io.write(listing:probe_edges(), "\n")
 
         -- Jumping between functions, which is what following a reference does.
         local addresses = {}
@@ -376,6 +371,24 @@ function M.open(ui)
 
         io.write(("render: %d failed of %d%s\n"):format(
           failed, #ui.session.functions(), first and ("  " .. first) or ""))
+      end
+
+      -- The same for the graph: laid out and painted for every function, on a
+      -- surface nobody sees. `DDD_SMOKE=graph`.
+      if mode == "graph" and ui.graph_view then
+        io.write(ui.graph_view:probe(), "\n")
+      end
+
+      -- And one of them to a file, to be looked at. `DDD_SMOKE=graph:/tmp/g.png`
+      -- draws whatever function the window opened on.
+      local drawn = mode and mode:match("^graph:(.+)$")
+      if drawn and ui.graph_view then
+        local at = tonumber(os.getenv("DDD_SMOKE_AT") or "") or ui.addr
+        local width, height, blocks = ui.graph_view:render_to(drawn, at)
+        io.write(("graph: %s\n"):format(
+          width and ("%d block(s), %dx%d -> %s"):format(blocks, width, height,
+                                                        drawn)
+            or "nothing to draw"))
       end
 
       local to = mode and mode:match("^map:(.+)$")
@@ -447,7 +460,30 @@ function M.open(ui)
       -- is why none of the single-letter commands appeared to work.
       if ui.listing_view then ui.listing_view.view:grab_focus() end
 
-      require("plugins.studio.analysis").start(ui)
+      -- What the analysis is about to be told, before it is told it.
+      --
+      -- Everything the sweep does follows from a handful of decisions -- where
+      -- the code starts, what else is mapped beside it, which instruction set
+      -- reads which stretch, which passes run -- and every one of them is
+      -- cheaper to make now than to correct afterwards: a blob analysed from
+      -- the wrong entry point is a few seconds of work thrown away and a
+      -- listing that has to be undone by hand. So the options come up first and
+      -- the sweep starts when they are closed. Closing without touching
+      -- anything is the old behaviour, one keystroke away.
+      local analysis = require("plugins.studio.analysis")
+      local options = require("plugins.studio.options")
+
+      if os.getenv("DDD_DRIVE") then
+        analysis.start(ui)
+      else
+        options.open(ui, {
+          title = "What the analysis is about to be told about this image",
+          note = "nothing has been read yet",
+          accept = "Start analysis",
+          on_start = function() analysis.start(ui) end,
+        })
+      end
+
       M.drive(ui, os.getenv("DDD_DRIVE"))
       return false
     end)

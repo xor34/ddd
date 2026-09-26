@@ -155,7 +155,12 @@ void push_xrefs(lua_State *L, Session &self, uint64_t address) {
   for (size_t i = 0; i < refs.size(); ++i) {
     lua_createtable(L, 0, 4);
     set_number(L, "from", static_cast<lua_Integer>(refs[i].from));
-    set_number(L, "to", static_cast<lua_Integer>(refs[i].to));
+    // The offset only. A destination can name another space than the one the
+    // referring instruction sits in (`Xref::to` is an Addr for exactly that
+    // reason), but nothing in the interface reads this back -- it is here for
+    // a plugin that wants to know where a reference points, and an offset is
+    // what an image address is.
+    set_number(L, "to", static_cast<lua_Integer>(refs[i].to.offset));
     set_string(L, "kind", refs[i].kind);
     set_string(L, "in", self.function_name_at(refs[i].from));
     lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
@@ -177,10 +182,10 @@ void push_line(lua_State *L, const TokenLine &line) {
   // Only when there is one: every line of every function goes through here, and
   // three fields that mean "no" on all but the last line of a block is three
   // more table entries per line to allocate and to read back.
-  if (line.taken >= 0)
-    set_number(L, "taken", line.taken);
-  if (line.fallthrough >= 0)
-    set_number(L, "fallthrough", line.fallthrough);
+  if (line.taken)
+    set_number(L, "taken", line.taken->index);
+  if (line.fallthrough)
+    set_number(L, "fallthrough", line.fallthrough->index);
   if (line.leaves_to != 0)
     set_number(L, "leaves", static_cast<lua_Integer>(line.leaves_to));
 
@@ -612,6 +617,132 @@ int session_add_region(lua_State *L) {
   return 1;
 }
 
+// session.set_entry(address) -- where the analysis starts from.
+int session_set_entry(lua_State *L) {
+  session(L)->set_entry(check_address(L, 1));
+  return 0;
+}
+
+// session.load_object(path, at, spec, abi, stack_pointer) -- another file, in
+// the same address space. What an image made of several objects needs.
+int session_load_object(lua_State *L) {
+  Session *self = session(L);
+  const bool ok =
+      self->load_object(check_string(L, 1), check_address(L, 2), opt_string(L, 3),
+                        opt_string(L, 4), opt_string(L, 5));
+  lua_pushboolean(L, ok);
+  return 1;
+}
+
+// session.objects() -- the files mapped into this image, and where.
+int session_objects(lua_State *L) {
+  const std::vector<Project::Object> &objects = session(L)->project().objects();
+
+  lua_createtable(L, static_cast<int>(objects.size()), 0);
+  for (size_t i = 0; i < objects.size(); ++i) {
+    lua_createtable(L, 0, 2);
+    set_string(L, "path", objects[i].path);
+    set_number(L, "at", static_cast<lua_Integer>(objects[i].at));
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+  }
+  return 1;
+}
+
+// session.threads() / session.threads(n) -- how many the sweeps may use.
+int session_threads(lua_State *L) {
+  Session *self = session(L);
+  if (!lua_isnoneornil(L, 1))
+    self->set_threads(static_cast<int>(luaL_checkinteger(L, 1)));
+  lua_pushinteger(L, self->threads());
+  return 1;
+}
+
+// session.regions() -- the stretches of the image, what reads them, and how.
+int session_regions(lua_State *L) {
+  const std::vector<Region> &regions = session(L)->regions();
+
+  lua_createtable(L, static_cast<int>(regions.size()), 0);
+  for (size_t i = 0; i < regions.size(); ++i) {
+    const Region &region = regions[i];
+
+    lua_createtable(L, 0, 6);
+    set_number(L, "begin", static_cast<lua_Integer>(region.begin));
+    set_number(L, "end", static_cast<lua_Integer>(region.end));
+    set_string(L, "name", region.name);
+
+    if (region.target != nullptr) {
+      set_string(L, "spec", region.target->spec);
+      if (region.target->abi != nullptr)
+        set_string(L, "abi", region.target->abi->name);
+
+      // What it is being decoded as, and what else it could be told: a spec
+      // has no default mode of its own, so this is how an interface offers
+      // `longMode` rather than expecting it to be known.
+      push_strings(L, region.target->context);
+      lua_setfield(L, -2, "context");
+
+      push_strings(L, region.target->context_variables);
+      lua_setfield(L, -2, "context_variables");
+    }
+
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+  }
+  return 1;
+}
+
+// session.detect_specs() -- what these bytes look like, best first.
+int session_detect_specs(lua_State *L) {
+  Session *self = session(L);
+  const int limit = lua_isnoneornil(L, 1)
+                        ? 5
+                        : static_cast<int>(luaL_checkinteger(L, 1));
+
+  const std::vector<Session::SpecGuess> found = self->detect_specs(limit);
+
+  lua_createtable(L, static_cast<int>(found.size()), 0);
+  for (size_t i = 0; i < found.size(); ++i) {
+    lua_createtable(L, 0, 3);
+    set_string(L, "spec", found[i].spec);
+    set_double(L, "confidence", found[i].confidence);
+    set_string(L, "detail", found[i].detail);
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+  }
+  return 1;
+}
+
+// session.retarget(begin, spec, { "longMode=1", ... }, abi, stack_pointer)
+//
+// Reading a stretch with a different instruction set, or the same one in a
+// different mode. `begin` of 0 means every code region -- a blob read as the
+// wrong architecture is wrong everywhere at once.
+int session_retarget(lua_State *L) {
+  Session *self = session(L);
+  const uint64_t begin = lua_isnoneornil(L, 1) ? 0 : check_address(L, 1);
+  const std::string spec = check_string(L, 2);
+
+  std::vector<std::string> context;
+  if (lua_istable(L, 3)) {
+    const lua_Integer count = luaL_len(L, 3);
+    for (lua_Integer i = 1; i <= count; ++i) {
+      lua_rawgeti(L, 3, i);
+      if (lua_isstring(L, -1)) context.push_back(lua_tostring(L, -1));
+      lua_pop(L, 1);
+    }
+  }
+
+  lua_pushboolean(L, self->retarget(begin, spec, context, opt_string(L, 4),
+                                    opt_string(L, 5)));
+  return 1;
+}
+
+// session.reanalyse() -- throw the reference index away and build it again.
+// The repair after an edit is local; this is the whole-image version, for when
+// something outside the tool changed what the bytes mean.
+int session_reanalyse(lua_State *L) {
+  session(L)->invalidate_index();
+  return 0;
+}
+
 int session_specs(lua_State *L) {
   const std::vector<std::string> specs = session(L)->available_specs();
 
@@ -681,6 +812,14 @@ const luaL_Reg kSessionFunctions[] = {
     {"define_function_at", session_define_function_at},
     {"define_string", session_define_string},
     {"add_region", session_add_region},
+    {"set_entry", session_set_entry},
+    {"load_object", session_load_object},
+    {"objects", session_objects},
+    {"threads", session_threads},
+    {"regions", session_regions},
+    {"detect_specs", session_detect_specs},
+    {"retarget", session_retarget},
+    {"reanalyse", session_reanalyse},
     {"specs", session_specs},
     {"set_signature", session_set_signature},
     {"signature", session_signature},

@@ -72,10 +72,38 @@ public:
     std::string spec;
     std::string abi;
     std::string stack_pointer;
+
+    // NAME=VALUE settings the spec declares -- `longMode=1`, `TMode=1`. A
+    // spec on its own has no mode, so which one a stretch is read in is a
+    // decision like any other here.
+    std::vector<std::string> context;
   };
 
   void add_region(RegionSpec region);
   const std::vector<RegionSpec> &regions() const { return regions_; }
+
+  // Another file mapped into the same address space, and where it goes.
+  //
+  // An image is not always one file -- a bootloader and an application, a
+  // firmware and the table it was linked against -- and which files those were
+  // is a decision, not something the bytes can be asked. Recorded so that
+  // opening the project again opens the same image; the path is taken as
+  // written, so it is relative to wherever the tool is run from unless it is
+  // absolute.
+  struct Object {
+    std::string path;
+    uint64_t at = 0;
+  };
+
+  void add_object(Object object);
+  const std::vector<Object> &objects() const { return objects_; }
+
+  // Where the code starts, when the file does not say or says wrong. A blob
+  // has no entry point until somebody names one, and naming one is a decision
+  // like any other here: discovery treats it as a function, and opening the
+  // project again opens there.
+  void set_entry(uint64_t address) { entry_ = address; }
+  uint64_t entry() const { return entry_; }
 
   // A region of the tree someone marked out by hand: a string, a jump table,
   // an item inside a blob. Kept separately from the instruction-set regions
@@ -117,6 +145,8 @@ private:
   std::map<uint64_t, uint64_t> data_; // begin -> end
   std::set<uint64_t> undefined_;
   std::vector<RegionSpec> regions_;
+  std::vector<Object> objects_;
+  uint64_t entry_ = 0;
   std::vector<Mark> marks_;
 };
 

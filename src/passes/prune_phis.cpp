@@ -11,8 +11,9 @@
 #include "../pass.h"
 #include "../reaching.h"
 
-#include <ostream>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace ddd {
 namespace {
@@ -29,19 +30,24 @@ public:
     // function and is exactly what the function computes. `dce` learned this
     // the same way; without it, deleting the phi makes everything feeding it
     // dead too, and the function empties out.
-    const std::set<int> roots = observable_values(fn, ctx);
+    const std::set<ValueId> roots = observable_values(fn, ctx);
 
-    const int removed = remove_ops_to_fixpoint(
+    removed_ = remove_ops_to_fixpoint(
         fn,
         [&roots](const SsaOp *phi) {
           return phi->out != nullptr && phi->out->uses.empty() &&
                  roots.count(phi->out->id) == 0;
         },
         {&SsaBlock::phis});
-
-    if (ctx.verbose)
-      ctx.stream() << "  removed " << removed << " dead phi(s)\n";
   }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    return {"removed " + std::to_string(removed_) + " dead phi(s)"};
+  }
+
+private:
+  int removed_ = 0;
 };
 
 DDD_REGISTER_PASS(PrunePhis);

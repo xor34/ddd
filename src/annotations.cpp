@@ -14,7 +14,7 @@ void Annotations::comment(const SsaOp &op, std::string text) {
   op_comments_[op.id].push_back(std::move(text));
 }
 
-void Annotations::comment_block(int block, std::string text) {
+void Annotations::comment_block(BlockId block, std::string text) {
   block_comments_[block].push_back(std::move(text));
 }
 
@@ -61,7 +61,7 @@ const std::vector<std::string> &Annotations::comments(const SsaOp &op) const {
   return it == op_comments_.end() ? no_comments() : it->second;
 }
 
-const std::vector<std::string> &Annotations::block_comments(int block) const {
+const std::vector<std::string> &Annotations::block_comments(BlockId block) const {
   auto it = block_comments_.find(block);
   return it == block_comments_.end() ? no_comments() : it->second;
 }

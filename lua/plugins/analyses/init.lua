@@ -17,6 +17,7 @@ require "plugins.analyses.user_names"
 require "plugins.analyses.data_refs"
 require "plugins.analyses.rename"
 require "plugins.analyses.calling_conv"
+require "plugins.analyses.machine_flags"
 require "plugins.analyses.signatures"
 
 ddd.workflow "readability" {
@@ -32,6 +33,7 @@ ddd.workflow "readability" {
       "simplify",
       "dce",
       "idioms",
+      "machine-flags",
       "data-refs",
       "symbols",
       "rename",

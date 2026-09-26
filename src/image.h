@@ -86,6 +86,27 @@ public:
     data_ = std::move(kept);
   }
 
+  // Another file's bytes, at an address in this image.
+  //
+  // A firmware is rarely one file: a bootloader at zero, an application at an
+  // offset, a table somewhere else. As far as the code is concerned that is one
+  // address space -- a call in one lands in the other -- so the analysis has to
+  // see one image, and this is how the second file gets into it. The gap
+  // between two objects reads as zero, which is what an unmapped hole reads as
+  // on the hardware as well.
+  //
+  // Upwards only: an object below the base would move every address in the
+  // image, and with them every note anybody has taken about one.
+  bool map(uint64_t at, const std::vector<uint8_t> &bytes) {
+    if (bytes.empty() || at < base_) return false;
+
+    const uint64_t offset = at - base_;
+    if (offset + bytes.size() > bytes_.size())
+      bytes_.resize(offset + bytes.size(), 0);
+    std::copy(bytes.begin(), bytes.end(), bytes_.begin() + offset);
+    return true;
+  }
+
   bool is_code(uint64_t addr) const {
     for (const auto &range : data_)
       if (addr >= range.first && addr < range.second) return false;

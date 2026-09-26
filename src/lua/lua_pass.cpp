@@ -9,8 +9,8 @@
 #include "lua_env.h"
 #include "lua_util.h"
 
-#include <ostream>
 #include <string>
+#include <vector>
 
 namespace ddd {
 namespace lua {
@@ -38,14 +38,20 @@ public:
     // A pass that raises is reported and skipped. One plugin throwing must not
     // abandon the rest of the pipeline, which is the whole listing.
     std::string error;
-    if (!pcall(L, 2, 0, error))
-      ctx.stream() << "  " << name_ << ": " << error << "\n";
+    if (!pcall(L, 2, 0, error)) failed_ = name_ + ": " + error;
+  }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    return failed_.empty() ? std::vector<std::string>{}
+                           : std::vector<std::string>{failed_};
   }
 
 private:
   std::string name_;
   std::string description_;
   int run_ref_;
+  std::string failed_;
 };
 
 // Pulls a string field out of the table at `index`.

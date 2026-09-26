@@ -7,36 +7,25 @@
 
 namespace ddd {
 
-bool default_track_filter(const VarnodeData &vn) {
-  if (vn.space == nullptr)
+bool default_track_filter(const Varnode &vn, const Spaces &spaces) {
+  if (vn.space == kNoSpace)
     return false;
-  switch (vn.space->getType()) {
-  case ghidra::IPTR_INTERNAL:
+  if (vn.space == kUniqueSpace)
     return true; // Sleigh temporaries
-  case ghidra::IPTR_PROCESSOR:
-    // "ram" and friends are also IPTR_PROCESSOR; per-address SSA over memory
-    // needs alias analysis first, so only registers are renamed.
-    return vn.space->getName() == "register";
-  default:
-    return false;
-  }
-}
-
-std::string SsaValue::name() const {
-  if (is_live_in())
-    return to_string(storage) + "#in";
-  return to_string(storage) + "#" + std::to_string(version);
+  // "ram" and friends are also real addressable memory; per-address SSA over
+  // it needs alias analysis first, so only the register bank is renamed.
+  return spaces.is_kind(vn.space, SpaceKind::Register);
 }
 
 SsaOp &SsaFunction::new_op() {
   ops_.emplace_back();
-  ops_.back().id = static_cast<int>(ops_.size()) - 1;
+  ops_.back().id = OpId{static_cast<int>(ops_.size()) - 1};
   return ops_.back();
 }
 
 SsaValue &SsaFunction::new_value() {
   values_.emplace_back();
-  values_.back().id = static_cast<int>(values_.size()) - 1;
+  values_.back().id = ValueId{static_cast<int>(values_.size()) - 1};
   return values_.back();
 }
 
@@ -84,29 +73,29 @@ namespace {
 // wants, and -- because a phi counts as a use of all its operands -- keeps the
 // entire dead computation feeding it alive through dead-code elimination too.
 // So compute liveness first and place phis only where they mean something.
-std::vector<std::unordered_set<Storage, StorageHash>>
+std::vector<std::unordered_set<Varnode, VarnodeHash>>
 live_in_storage(const Cfg &cfg,
-                const std::function<bool(const VarnodeData &)> &track,
-                const std::vector<Storage> &live_at_exit) {
+                const std::function<bool(const Varnode &)> &track,
+                const std::vector<Varnode> &live_at_exit) {
   const int n = cfg.size();
-  std::vector<std::unordered_set<Storage, StorageHash>> uses(n), defs(n), live(n);
+  std::vector<std::unordered_set<Varnode, VarnodeHash>> uses(n), defs(n),
+      live(n);
 
   for (int b = 0; b < n; ++b) {
-    for (const PcodeOp &op : cfg[b].ops) {
+    for (const PcodeOp &op : cfg[BlockId{b}].ops) {
       // Read before written in this block: live in.
-      for (const VarnodeData &in : op.inputs) {
+      for (const Varnode &in : op.inputs) {
         if (!track(in)) continue;
-        const Storage storage = storage_of(in);
-        if (defs[b].count(storage) == 0) uses[b].insert(storage);
+        if (defs[b].count(in) == 0) uses[b].insert(in);
       }
       if (op.has_output && track(op.output))
-        defs[b].insert(storage_of(op.output));
+        defs[b].insert(op.output);
     }
     live[b] = uses[b];
 
     // Anything the caller reads is live where control leaves the function.
-    if (cfg[b].ends_in_return || cfg[b].succs.empty())
-      for (const Storage &storage : live_at_exit)
+    if (cfg[BlockId{b}].ends_in_return || cfg[BlockId{b}].succs.empty())
+      for (const Varnode &storage : live_at_exit)
         if (defs[b].count(storage) == 0) live[b].insert(storage);
   }
 
@@ -115,8 +104,8 @@ live_in_storage(const Cfg &cfg,
     changed = false;
 
     for (int b = n; b-- > 0;) {
-      for (const Edge &edge : cfg[b].succs) {
-        for (const Storage &storage : live[edge.target]) {
+      for (const Edge &edge : cfg[BlockId{b}].succs) {
+        for (const Varnode &storage : live[edge.target]) {
           if (defs[b].count(storage) != 0) continue;
           if (live[b].insert(storage).second) changed = true;
         }
@@ -135,22 +124,27 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   fn.dom_ = compute_dominance(cfg);
   fn.blocks_.resize(cfg.size());
   for (int b = 0; b < cfg.size(); ++b)
-    fn.blocks_[b].id = b;
-  if (cfg.empty() || cfg.entry < 0)
+    fn.blocks_[b].id = BlockId{b};
+  if (cfg.empty() || !cfg.entry)
     return fn;
 
   const Dominance &dom = fn.dom_;
-  const auto &track = options.track;
+  const Spaces &spaces = fn.spaces();
+  const auto &track = options.track
+                          ? options.track
+                          : [&spaces](const Varnode &vn) {
+                              return default_track_filter(vn, spaces);
+                            };
 
   // Storage of an op's destination, valid while `renames_output` is set.
   // Kept beside the ops rather than inside them: it is build scaffolding,
   // not part of the IR.
-  std::vector<Storage> output_storage;
+  std::vector<Varnode> output_storage;
   std::vector<char> renames_output;
 
-  auto note_output = [&](const SsaOp &op, Storage storage, bool renamed) {
-    output_storage.resize(op.id + 1);
-    renames_output.resize(op.id + 1, 0);
+  auto note_output = [&](const SsaOp &op, Varnode storage, bool renamed) {
+    output_storage.resize(static_cast<size_t>(op.id.index) + 1);
+    renames_output.resize(static_cast<size_t>(op.id.index) + 1, 0);
     output_storage[op.id] = storage;
     renames_output[op.id] = renamed ? 1 : 0;
   };
@@ -159,34 +153,35 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   // Ordered containers throughout: phi placement order decides the order
   // values are numbered, so an unordered_map here would make the whole IR
   // differ between runs.
-  std::map<Storage, std::set<int>> def_sites;
+  std::map<Varnode, std::set<BlockId>> def_sites;
 
   for (int b = 0; b < cfg.size(); ++b) {
-    for (const PcodeOp &raw : cfg[b].ops) {
+    for (const PcodeOp &raw : cfg[BlockId{b}].ops) {
       SsaOp &op = fn.new_op();
-      op.block = b;
+      op.block = BlockId{b};
       op.addr = raw.addr;
       op.opc = raw.opc;
 
-      for (const VarnodeData &in : raw.inputs) {
+      for (const Varnode &in : raw.inputs) {
         op.ins.push_back(SsaOperand{in, nullptr});
       }
 
-      bool renamed = raw.has_output && dom.reachable(b) && track(raw.output);
+      bool renamed = raw.has_output && dom.reachable(BlockId{b}) &&
+                     track(raw.output);
       if (raw.has_output && !renamed) {
         op.has_raw_output = true;
         op.raw_output = raw.output;
       }
 
-      // storage_for, not storage_of: a Sleigh temporary belongs to the
-      // instruction that wrote it. Without that scope, one reused unique
-      // offset is one function-wide variable and every join gets a phi for it.
-      note_output(op,
-                  raw.has_output ? storage_of(raw.output) : Storage{},
-                  renamed);
+      // Plain storage identity, no extra scoping: Sleigh itself or's the
+      // instruction's address bits into every unique-space offset it emits,
+      // so a temporary already belongs to the instruction that wrote it, and
+      // one reused offset does not become one function-wide variable that
+      // every join gets a phi for.
+      note_output(op, raw.has_output ? raw.output : Varnode{}, renamed);
 
       if (renamed) {
-        def_sites[storage_of(raw.output)].insert(b);
+        def_sites[raw.output].insert(BlockId{b});
       }
 
       fn.blocks_[b].ops.push_back(&op);
@@ -194,20 +189,20 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   }
 
   // ---- 2. phis at the iterated dominance frontier of each storage ----
-  const std::vector<std::unordered_set<Storage, StorageHash>> live =
+  const std::vector<std::unordered_set<Varnode, VarnodeHash>> live =
       live_in_storage(cfg, track, options.live_at_exit);
 
   for (const auto &entry : def_sites) {
-    const Storage &storage = entry.first;
-    std::vector<int> worklist(entry.second.begin(), entry.second.end());
-    std::set<int> queued(entry.second.begin(), entry.second.end());
-    std::set<int> placed;
+    const Varnode &storage = entry.first;
+    std::vector<BlockId> worklist(entry.second.begin(), entry.second.end());
+    std::set<BlockId> queued(entry.second.begin(), entry.second.end());
+    std::set<BlockId> placed;
 
     while (!worklist.empty()) {
-      int b = worklist.back();
+      BlockId b = worklist.back();
       worklist.pop_back();
 
-      for (int d : dom.frontier[b]) {
+      for (BlockId d : dom.frontier[b]) {
         // Pruned: no phi where the value is already dead.
         if (live[d].count(storage) == 0)
           continue;
@@ -217,7 +212,6 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
         SsaOp &phi = fn.new_op();
         phi.block = d;
         phi.addr = cfg[d].start;
-        phi.opc = ghidra::CPUI_MULTIEQUAL;
         phi.is_phi = true;
         phi.ins.resize(cfg[d].preds.size()); // operands patched during renaming
         note_output(phi, storage, true);
@@ -230,15 +224,15 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
   }
 
   // ---- 3. rename on a dominator-tree walk ----
-  std::unordered_map<Storage, std::vector<SsaValue *>, StorageHash> stacks;
-  std::unordered_map<Storage, int, StorageHash> next_version;
-  std::unordered_map<Storage, SsaValue *, StorageHash> live_ins;
+  std::unordered_map<Varnode, std::vector<SsaValue *>, VarnodeHash> stacks;
+  std::unordered_map<Varnode, int, VarnodeHash> next_version;
+  std::unordered_map<Varnode, SsaValue *, VarnodeHash> live_ins;
 
   // A use with nothing on its stack reads a value defined before the
   // function: a parameter, or genuinely uninitialised storage. One live-in
   // per storage, pushed at the bottom of the stack and never popped, so
   // every path sees the same one.
-  auto live_in = [&](const Storage &storage) -> SsaValue * {
+  auto live_in = [&](const Varnode &storage) -> SsaValue * {
     auto it = live_ins.find(storage);
     if (it != live_ins.end())
       return it->second;
@@ -246,34 +240,34 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
     SsaValue &value = fn.new_value();
     value.storage = storage;
     value.version = next_version[storage]++;
-    value.block = cfg.entry;
+    value.block = *cfg.entry;
     live_ins[storage] = &value;
     stacks[storage].push_back(&value);
     return &value;
   };
 
-  auto current = [&](const Storage &storage) -> SsaValue * {
+  auto current = [&](const Varnode &storage) -> SsaValue * {
     std::vector<SsaValue *> &stack = stacks[storage];
     return stack.empty() ? live_in(storage) : stack.back();
   };
 
   struct Frame {
-    int block;
+    BlockId block;
     size_t next_child = 0;
-    std::vector<Storage> pushed;
+    std::vector<Varnode> pushed;
   };
 
-  std::vector<Frame> walk{Frame{cfg.entry}};
+  std::vector<Frame> walk{Frame{*cfg.entry}};
   std::vector<bool> entered(cfg.size(), false);
 
   while (!walk.empty()) {
-    int b = walk.back().block;
+    BlockId b = walk.back().block;
 
     if (!entered[b]) {
       entered[b] = true;
 
       auto define = [&](SsaOp *op) {
-        const Storage &storage = output_storage[op->id];
+        const Varnode &storage = output_storage[op->id];
         SsaValue &value = fn.new_value();
         value.storage = storage;
         value.version = next_version[storage]++;
@@ -290,7 +284,7 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       for (SsaOp *op : fn.blocks_[b].ops) {
         for (SsaOperand &in : op->ins)
           if (track(in.raw))
-            in.value = current(storage_of(in.raw));
+            in.value = current(in.raw);
         if (renames_output[op->id])
           define(op);
       }
@@ -318,7 +312,7 @@ SsaFunction build_ssa(const Cfg &cfg, SsaOptions options) {
       continue;
     }
 
-    for (const Storage &storage : top.pushed)
+    for (const Varnode &storage : top.pushed)
       stacks[storage].pop_back();
     walk.pop_back();
   }

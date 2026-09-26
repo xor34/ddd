@@ -7,18 +7,22 @@
 
 #include "cfg.h"
 
+#include <optional>
 #include <vector>
 
 namespace ddd {
 
 struct Dominance {
-  std::vector<int> idom; // -1 for the entry and for unreachable blocks
-  std::vector<std::vector<int>> children; // dominator-tree children
-  std::vector<std::vector<int>> frontier; // DF(b), sorted and deduplicated
-  std::vector<int> rpo;                   // reachable blocks, reverse postorder
-  std::vector<int> rpo_index;             // position in rpo, -1 if unreachable
+  // Immediate dominator, per block: nullopt for the entry and for
+  // unreachable blocks -- "no immediate dominator" is the absence of a
+  // BlockId, not a -1 somebody has to remember.
+  std::vector<std::optional<BlockId>> idom;
+  std::vector<std::vector<BlockId>> children; // dominator-tree children
+  std::vector<std::vector<BlockId>> frontier; // DF(b), sorted and deduplicated
+  std::vector<BlockId> rpo;    // reachable blocks, reverse postorder
+  std::vector<int> rpo_index;  // position in rpo, -1 if unreachable
 
-  bool reachable(int block) const { return rpo_index[block] >= 0; }
+  bool reachable(BlockId block) const { return rpo_index[block] >= 0; }
 };
 
 Dominance compute_dominance(const Cfg &cfg);

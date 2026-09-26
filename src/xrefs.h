@@ -15,10 +15,11 @@
 namespace ddd {
 
 struct Xref {
-  uint64_t from = 0;   // the instruction that refers
-  uint64_t to = 0;     // what it refers to
-  std::string kind;    // "call", "branch", "data"
-  std::string in;      // the function containing `from`
+  uint64_t from = 0; // the instruction that refers: an offset in the space of
+                     // the Cfg that made the reference
+  Addr to;           // what it refers to
+  std::string kind;  // "call", "branch", "data"
+  std::string in;    // the function containing `from`
 };
 
 class Xrefs {
@@ -49,18 +50,24 @@ public:
   // marking sixteen bytes as data cost a re-analysis of everything.
   void forget(uint64_t begin, uint64_t end);
 
-  // References *to* an address, in the order they were found.
-  const std::vector<Xref> &to(uint64_t address) const;
+  // References *to* a location, in the order they were found.
+  const std::vector<Xref> &to(const Addr &address) const;
 
-  // Everything something calls, in address order. In a stripped binary this is
-  // most of what is known about where the functions are: nothing else in the
-  // file says so, but a call instruction is evidence that survives stripping.
-  std::vector<uint64_t> call_targets() const;
+  // Everything something calls, in location order. In a stripped binary this
+  // is most of what is known about where the functions are: nothing else in
+  // the file says so, but a call instruction is evidence that survives
+  // stripping.
+  std::vector<Addr> call_targets() const;
 
   size_t size() const { return count_; }
 
 private:
-  std::map<uint64_t, std::vector<Xref>> incoming_;
+  // Keyed by what is referred to, as a full location: two regions decoded
+  // with different instruction sets name their destinations in different
+  // spaces, and keying by bare offset would fold both into one list -- which
+  // in an image with more than one instruction set is the rule, not the
+  // exception.
+  std::map<Addr, std::vector<Xref>> incoming_;
   size_t count_ = 0;
 };
 

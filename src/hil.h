@@ -19,7 +19,6 @@
 #pragma once
 
 #include "pass.h"
-#include "reaching.h"
 #include "ssa.h"
 
 #include <deque>
@@ -53,7 +52,7 @@ struct Expr {
   // For a phi: which predecessor each operand arrives from, in the same order.
   // A phi without them says `phi(a, b)` and leaves the reader to work out which
   // branch produced which -- which is the only thing a phi is actually saying.
-  std::vector<int> operand_blocks;
+  std::vector<BlockId> operand_blocks;
 };
 
 enum class StatementKind {
@@ -68,28 +67,37 @@ enum class StatementKind {
 
 struct Statement {
   StatementKind kind = StatementKind::Effect;
-  Address addr;
+  uint64_t addr = 0;
   const SsaOp *op = nullptr;
 
   const SsaValue *target = nullptr; // Assign
   std::string target_text;          // how the target is displayed
   ExprRef value = nullptr;
-  ExprRef address = nullptr; // Store
-  int taken = -1;            // Branch / CondBranch
-  int fallthrough = -1;      // CondBranch
+  ExprRef address = nullptr;      // Store
+  std::optional<BlockId> taken;   // Branch / CondBranch
+  std::optional<BlockId> fallthrough; // CondBranch
 
-  // Branch / CondBranch, when the taken edge leaves the function: the address
-  // it goes to. A tail call is a branch out of the function, and the function
-  // it lands in is the single most useful thing on the line -- so it is carried
-  // here rather than being reduced to "no block", which is what printing `goto
-  // -1` was saying.
-  uint64_t leaves_to = 0;
+  // Branch / CondBranch, when the taken edge leaves the function: the
+  // location it goes to, space included (a branch can name another space than
+  // the one this function lives in). A tail call is a branch out of the
+  // function, and the function it lands in is the single most useful thing on
+  // the line -- so it is carried here rather than being reduced to "no
+  // block", which is what printing `goto -1` was saying.
+  Addr leaves_to;
 };
 
 struct HilBlock {
-  int id = -1;
+  BlockId id;
   std::vector<Statement> statements;
 };
+
+namespace detail {
+// Defined in hil_build.cpp. Named rather than left anonymous because Hil has to
+// be able to befriend it: the arena it fills is not something a caller should
+// be able to push into, and a friend declaration for a class with no name
+// anywhere is a friend declaration nobody reading this can follow.
+class HilBuilder;
+} // namespace detail
 
 class Hil {
 public:
@@ -98,7 +106,7 @@ public:
   int rewritten() const { return rewritten_; }
 
 private:
-  friend class HilBuilder;
+  friend class detail::HilBuilder;
 
   std::deque<Expr> arena_; // stable addresses; ExprRef points in here
   std::vector<HilBlock> blocks_;
@@ -132,17 +140,22 @@ struct TokenLine {
   // the printed form of a decision that was already made here -- and the
   // difference between the two edges of a condition is exactly what a reader
   // wants marked.
-  int taken = -1;         // block id, for a branch
-  int fallthrough = -1;   // block id, for the other edge of a condition
-  uint64_t leaves_to = 0; // an address outside the function, for a tail call
+  std::optional<BlockId> taken;       // block id, for a branch
+  std::optional<BlockId> fallthrough; // the other edge of a condition
+
+  // An image address outside the function, for a tail call: set only when the
+  // destination is in this function's own space, which is the only kind an
+  // image address *is*. A destination in another space has no image address
+  // to give -- the tokens on the line still spell it out, space and all.
+  uint64_t leaves_to = 0;
 };
 
 struct TokenBlock {
-  int id = -1;
+  BlockId id;
   uint64_t addr = 0;
   bool entry = false;
-  std::vector<int> preds;
-  std::vector<int> succs;
+  std::vector<BlockId> preds;
+  std::vector<BlockId> succs;
   std::vector<std::string> comments;
   std::vector<TokenLine> lines;
 };

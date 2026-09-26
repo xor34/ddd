@@ -155,6 +155,37 @@ end
 -- every other key first and can claim one by returning true -- which is how a
 -- picker adds up/down, and how the references window adds its own keys,
 -- without each writing its own EventControllerKey and Escape handling.
+-- "<control>q", "<alt>Left", "semicolon", "g" -- the shape GTK writes
+-- accelerators in, without pulling in the accelerator machinery, which wants
+-- actions rather than a table of closures.
+--
+-- Here rather than in the window, because a view has to be able to ask the same
+-- question: a text view has bindings of its own -- ctrl+a selects everything,
+-- ctrl+d and the arrows move its insertion point -- and it consumes them before
+-- anything at the window level is offered them. Whoever wants a key first has
+-- to check the keymap first, and that means the check has to be shared.
+local function modifier(state, name)
+  if state == nil then return false end
+  if type(state) == "table" then return state[name] == true end
+
+  local mask = Gdk.ModifierType[name]
+  mask = tonumber(mask) or 0
+  return (state & mask) ~= 0
+end
+
+function M.accelerator(accelerator, name, state)
+  local wanted = {}
+  local key = accelerator:gsub("<(%a+)>", function(found)
+    wanted[found:lower()] = true
+    return ""
+  end)
+
+  if (wanted.control or false) ~= modifier(state, "CONTROL_MASK") then return false end
+  if (wanted.alt or false) ~= modifier(state, "ALT_MASK") then return false end
+  if (wanted.shift or false) ~= modifier(state, "SHIFT_MASK") then return false end
+  return key:lower() == (name or ""):lower()
+end
+
 function M.modal(parent, options)
   options = options or {}
 

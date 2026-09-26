@@ -23,8 +23,6 @@
 #include "../pass.h"
 #include "../script.h"
 
-#include "opcodes.hh"
-
 #include <iomanip>
 #include <ostream>
 #include <sstream>
@@ -91,7 +89,7 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
 
     const BasicBlock &raw = fn.cfg()[block.id];
     os << "{\"id\":" << block.id;
-    os << ",\"start\":" << raw.start.getOffset();
+    os << ",\"start\":" << raw.start;
     os << ",\"preds\":[";
     for (size_t i = 0; i < raw.preds.size(); ++i)
       os << (i ? "," : "") << raw.preds[i];
@@ -111,9 +109,9 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
 
     os << "{\"id\":" << op.id;
     os << ",\"block\":" << op.block;
-    os << ",\"address\":" << op.addr.getOffset();
+    os << ",\"address\":" << op.addr;
     os << ",\"opcode\":";
-    write_escaped(os, ghidra::get_opname(op.opc));
+    write_escaped(os, op_name(op.opc));
     os << ",\"phi\":" << (op.is_phi ? "true" : "false");
 
     if (op.out != nullptr) {
@@ -142,7 +140,7 @@ std::string to_json(const SsaFunction &fn, const PassContext &ctx) {
 
   os << ",\"values\":[";
   for (int i = 0; i < fn.value_count(); ++i) {
-    const SsaValue &value = fn.value(i);
+    const SsaValue &value = fn.value(ValueId{i});
     if (i)
       os << ",";
     os << "{\"id\":" << value.id;
@@ -173,7 +171,7 @@ int apply(const std::string &reply, SsaFunction &fn, PassContext &ctx) {
     int id = -1;
     fields >> verb >> id;
     if (!fields) {
-      ctx.stream() << "  ignoring malformed directive: " << line << "\n";
+      ctx.say("ignoring malformed directive: " + line);
       continue;
     }
 
@@ -184,24 +182,24 @@ int apply(const std::string &reply, SsaFunction &fn, PassContext &ctx) {
 
     if (verb == "comment") {
       if (id < 0 || id >= fn.op_count()) {
-        ctx.stream() << "  no such op: " << id << "\n";
+        ctx.say("no such op: " + std::to_string(id));
         continue;
       }
-      ctx.annotations->comment(fn.op(id), text);
+      ctx.annotations->comment(fn.op(OpId{id}), text);
     } else if (verb == "block-comment") {
       if (id < 0 || id >= fn.size()) {
-        ctx.stream() << "  no such block: " << id << "\n";
+        ctx.say("no such block: " + std::to_string(id));
         continue;
       }
-      ctx.annotations->comment_block(id, text);
+      ctx.annotations->comment_block(BlockId{id}, text);
     } else if (verb == "label") {
       if (id < 0 || id >= fn.value_count()) {
-        ctx.stream() << "  no such value: " << id << "\n";
+        ctx.say("no such value: " + std::to_string(id));
         continue;
       }
-      ctx.annotations->set_label(fn.value(id), text);
+      ctx.annotations->set_label(fn.value(ValueId{id}), text);
     } else {
-      ctx.stream() << "  unknown directive: " << verb << "\n";
+      ctx.say("unknown directive: " + verb);
       continue;
     }
     ++applied;
@@ -223,18 +221,25 @@ public:
 
     ScriptResult result = run_script(interpreter_for(path_), input);
     if (!result.ok) {
-      ctx.stream() << "  " << path_ << ": " << result.error << "\n";
+      ctx.say(path_ + ": " + result.error);
       return;
     }
 
+    // Directives the script got wrong are reported by apply() through the same
+    // channel: a script is a pass like any other, and the listing is the only
+    // thing that should reach the stream.
     std::string reply(result.output.begin(), result.output.end());
-    int applied = apply(reply, fn, ctx);
-    if (ctx.verbose)
-      ctx.stream() << "  applied " << applied << " directive(s)\n";
+    applied_ = apply(reply, fn, ctx);
+  }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    return {"applied " + std::to_string(applied_) + " directive(s)"};
   }
 
 private:
   std::string path_;
+  int applied_ = 0;
 };
 
 } // namespace

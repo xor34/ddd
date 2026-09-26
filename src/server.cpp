@@ -50,6 +50,11 @@ std::string line_json(const TokenLine &line) {
       .str();
 }
 
+// Block ids, as the protocol's plain numbers.
+std::vector<int> numbers(const std::vector<BlockId> &ids) {
+  return std::vector<int>(ids.begin(), ids.end());
+}
+
 std::string block_json(Session &session, const TokenBlock &block) {
   std::vector<std::string> lines;
   for (const TokenLine &line : block.lines)
@@ -59,8 +64,8 @@ std::string block_json(Session &session, const TokenBlock &block) {
       .number_field("id", block.id)
       .number_field("addr", block.addr)
       .bool_field("entry", block.entry)
-      .field("preds", json::number_array(block.preds))
-      .field("succs", json::number_array(block.succs))
+      .field("preds", json::number_array(numbers(block.preds)))
+      .field("succs", json::number_array(numbers(block.succs)))
       .field("comments", json::string_array(block.comments))
       .field("lines", json::array(lines))
       // References belong in the listing, not in a panel beside it: what jumps

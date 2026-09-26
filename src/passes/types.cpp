@@ -21,8 +21,6 @@
 #include "../pass.h"
 #include "../project.h"
 
-#include "opcodes.hh"
-
 #include <map>
 #include <ostream>
 #include <set>
@@ -43,31 +41,31 @@ struct Evidence {
 
 // Signed and unsigned operations name themselves in p-code, which is the whole
 // reason the distinction is recoverable at all.
-bool signed_op(OpCode opc) {
-  switch (opc) {
-  case ghidra::CPUI_INT_SLESS:
-  case ghidra::CPUI_INT_SLESSEQUAL:
-  case ghidra::CPUI_INT_SRIGHT:
-  case ghidra::CPUI_INT_SEXT:
-  case ghidra::CPUI_INT_SDIV:
-  case ghidra::CPUI_INT_SREM:
-  case ghidra::CPUI_INT_SBORROW:
-  case ghidra::CPUI_INT_SCARRY:
+bool signed_op(Op op) {
+  switch (op) {
+  case Op::INT_SLESS:
+  case Op::INT_SLESSEQUAL:
+  case Op::INT_SRIGHT:
+  case Op::INT_SEXT:
+  case Op::INT_SDIV:
+  case Op::INT_SREM:
+  case Op::INT_SBORROW:
+  case Op::INT_SCARRY:
     return true;
   default:
     return false;
   }
 }
 
-bool unsigned_op(OpCode opc) {
-  switch (opc) {
-  case ghidra::CPUI_INT_LESS:
-  case ghidra::CPUI_INT_LESSEQUAL:
-  case ghidra::CPUI_INT_RIGHT:
-  case ghidra::CPUI_INT_ZEXT:
-  case ghidra::CPUI_INT_DIV:
-  case ghidra::CPUI_INT_REM:
-  case ghidra::CPUI_INT_CARRY:
+bool unsigned_op(Op op) {
+  switch (op) {
+  case Op::INT_LESS:
+  case Op::INT_LESSEQUAL:
+  case Op::INT_RIGHT:
+  case Op::INT_ZEXT:
+  case Op::INT_DIV:
+  case Op::INT_REM:
+  case Op::INT_CARRY:
     return true;
   default:
     return false;
@@ -123,11 +121,12 @@ public:
     evidence_.resize(fn.value_count());
     slots_.clear();
     declared_.clear();
+    named_.clear();
 
     gather(fn, ctx);
     spread(fn);
     gather_slots(fn, ctx);
-    report(fn, ctx);
+    announce(fn, ctx);
   }
 
 private:
@@ -138,13 +137,13 @@ private:
   void gather(SsaFunction &fn, PassContext &ctx) {
     fn.for_each_op([&](SsaOp &op) {
       // An address operand is a pointer, and the access width says to what.
-      if (op.opc == ghidra::CPUI_LOAD && op.ins.size() >= 2) {
+      if (op.opc == Op::LOAD && op.ins.size() >= 2) {
         if (Evidence *address = of(op.ins[1])) {
           address->pointer = true;
           if (op.out != nullptr) address->pointee = op.out->storage.size;
         }
       }
-      if (op.opc == ghidra::CPUI_STORE && op.ins.size() >= 3) {
+      if (op.opc == Op::STORE && op.ins.size() >= 3) {
         if (Evidence *address = of(op.ins[1])) {
           address->pointer = true;
           address->pointee = op.ins[2].raw.size;
@@ -152,15 +151,15 @@ private:
       }
 
       // The condition of a branch is a truth value.
-      if (op.opc == ghidra::CPUI_CBRANCH && op.ins.size() >= 2)
+      if (op.opc == Op::CBRANCH && op.ins.size() >= 2)
         if (Evidence *condition = of(op.ins[1])) condition->boolean = true;
 
       const bool is_signed = signed_op(op.opc);
       const bool is_unsigned = unsigned_op(op.opc);
-      const bool is_boolean = op.opc == ghidra::CPUI_BOOL_AND ||
-                              op.opc == ghidra::CPUI_BOOL_OR ||
-                              op.opc == ghidra::CPUI_BOOL_XOR ||
-                              op.opc == ghidra::CPUI_BOOL_NEGATE;
+      const bool is_boolean = op.opc == Op::BOOL_AND ||
+                              op.opc == Op::BOOL_OR ||
+                              op.opc == Op::BOOL_XOR ||
+                              op.opc == Op::BOOL_NEGATE;
 
       for (const SsaOperand &in : op.ins) {
         Evidence *operand = of(in);
@@ -172,8 +171,8 @@ private:
 
       // A comparison yields a truth value whatever its operands were.
       if (op.out != nullptr &&
-          (is_boolean || op.opc == ghidra::CPUI_INT_EQUAL ||
-           op.opc == ghidra::CPUI_INT_NOTEQUAL || is_signed || is_unsigned))
+          (is_boolean || op.opc == Op::INT_EQUAL ||
+           op.opc == Op::INT_NOTEQUAL || is_signed || is_unsigned))
         if (op.out->storage.size == 1) evidence_[op.out->id].boolean = true;
 
       // A constant that lands on a function or a string is that kind of
@@ -198,11 +197,11 @@ private:
         if (op.out == nullptr) return;
         Evidence &result = evidence_[op.out->id];
 
-        const bool additive = op.opc == ghidra::CPUI_INT_ADD ||
-                              op.opc == ghidra::CPUI_INT_SUB;
-        const bool copy = op.opc == ghidra::CPUI_COPY ||
-                          op.opc == ghidra::CPUI_INT_ZEXT ||
-                          op.opc == ghidra::CPUI_INT_SEXT || op.is_phi;
+        const bool additive = op.opc == Op::INT_ADD ||
+                              op.opc == Op::INT_SUB;
+        const bool copy = op.opc == Op::COPY ||
+                          op.opc == Op::INT_ZEXT ||
+                          op.opc == Op::INT_SEXT || op.is_phi;
         if (!additive && !copy) return;
 
         for (const SsaOperand &in : op.ins) {
@@ -259,11 +258,11 @@ private:
     };
 
     fn.for_each_op([&](SsaOp &op) {
-      if (op.opc == ghidra::CPUI_LOAD && op.ins.size() >= 2 && op.out != nullptr) {
+      if (op.opc == Op::LOAD && op.ins.size() >= 2 && op.out != nullptr) {
         if (const std::string *slot = slot_of(op.ins[1]))
           merge(*slot, evidence_[op.out->id]);
       }
-      if (op.opc == ghidra::CPUI_STORE && op.ins.size() >= 3) {
+      if (op.opc == Op::STORE && op.ins.size() >= 3) {
         if (const std::string *slot = slot_of(op.ins[1]))
           if (op.ins[2].is_tracked()) merge(*slot, evidence_[op.ins[2].value->id]);
       }
@@ -272,12 +271,12 @@ private:
 
   // Only the variables that survive into the listing are worth naming a type
   // for; everything else folded into an expression.
-  void report(SsaFunction &fn, PassContext &ctx) {
+  void announce(SsaFunction &fn, PassContext &ctx) {
     if (ctx.annotations == nullptr) return;
 
     std::map<std::string, std::string> named;
     for (int i = 0; i < fn.value_count(); ++i) {
-      const SsaValue &value = fn.value(i);
+      const SsaValue &value = fn.value(ValueId{i});
       if (!ctx.annotations->has_display_name(value)) continue;
 
       std::string shown = ctx.annotations->display_name(value);
@@ -285,7 +284,7 @@ private:
 
       // The slot's type is the type of what is stored in it, which the
       // pointer evidence on its address already records.
-      const Evidence &evidence = evidence_[i];
+      const Evidence &evidence = evidence_[value.id];
       unsigned size = value.storage.size;
       Evidence effective = evidence;
 
@@ -337,17 +336,27 @@ private:
       std::ostringstream comment;
       comment << "vars:" << types.str();
       if (skipped != 0) comment << " (+" << skipped << " plain)";
-      ctx.annotations->comment_block(fn.cfg().entry, comment.str());
+      if (fn.cfg().entry)
+        ctx.annotations->comment_block(*fn.cfg().entry, comment.str());
     }
 
-    // Everything, when asked: `e verbose=1` in the session, or the batch run.
-    if (ctx.verbose) {
-      ctx.stream() << "  typed " << named.size() << " variable(s)\n";
-      for (const auto &entry : named)
-        ctx.stream() << "    " << entry.second << " " << entry.first << "\n";
-    }
+    // Kept rather than described: the block comment above is the summary the
+    // listing carries, and the full list is long enough that spelling it out
+    // waits until someone asks for a report.
+    named_ = std::move(named);
   }
 
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    std::vector<std::string> lines;
+    lines.push_back("typed " + std::to_string(named_.size()) + " variable(s)");
+    for (const auto &entry : named_)
+      lines.push_back("  " + entry.second + " " + entry.first);
+    return lines;
+  }
+
+private:
+  std::map<std::string, std::string> named_;
   std::vector<Evidence> evidence_;
   std::map<std::string, Evidence> slots_;
   std::set<std::string> declared_;

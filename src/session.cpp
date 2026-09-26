@@ -1,11 +1,15 @@
 #include "session.h"
 
+#include "extract.h"
+
 #include "sleigh.hh"
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 
 namespace ddd {
@@ -54,24 +58,22 @@ constexpr uint64_t kThreadsFrom = 128 * 1024;
 // as well; none of it is reachable, and where the reachable part stops is where
 // the function does.
 uint64_t reachable_end(const Cfg &cfg) {
-  if (cfg.empty() || cfg.entry < 0)
+  if (cfg.empty() || !cfg.entry)
     return 0;
 
   std::vector<bool> seen(cfg.blocks.size(), false);
-  std::vector<int> pending{cfg.entry};
-  seen[cfg.entry] = true;
+  std::vector<BlockId> pending{*cfg.entry};
+  seen[*cfg.entry] = true;
 
   uint64_t end = 0;
   while (!pending.empty()) {
-    const int id = pending.back();
+    const BlockId id = pending.back();
     pending.pop_back();
 
     const BasicBlock &block = cfg.blocks[id];
-    end = std::max(end, block.end.getOffset());
+    end = std::max(end, block.end);
 
     for (const Edge &edge : block.succs) {
-      if (edge.target < 0 || edge.target >= static_cast<int>(cfg.blocks.size()))
-        continue;
       if (seen[edge.target])
         continue;
       seen[edge.target] = true;
@@ -80,6 +82,19 @@ uint64_t reachable_end(const Cfg &cfg) {
   }
 
   return end;
+}
+
+// Whole file, as bytes. Nothing here knows or cares what format it is: an
+// object mapped into an image at an address is bytes at an address, and a
+// header that says otherwise is the loader's business, not this one's.
+std::vector<uint8_t> read_object(const std::string &path, bool &ok) {
+  std::ifstream file(path, std::ios::binary);
+  ok = static_cast<bool>(file);
+  if (!ok)
+    return {};
+
+  return std::vector<uint8_t>(std::istreambuf_iterator<char>(file),
+                              std::istreambuf_iterator<char>());
 }
 
 } // namespace
@@ -91,13 +106,12 @@ std::unique_ptr<Lifted> lift(const Region &region, uint64_t entry,
     return nullptr;
 
   ghidra::Sleigh &translator = *region.target->translator;
-  ghidra::Address start(translator.getDefaultCodeSpace(),
-                        entry != 0 ? entry : region.begin);
+  const uint64_t start = entry != 0 ? entry : region.begin;
 
   SweepLimits limits;
   limits.max_instructions = max_instructions;
   limits.disassemble = disassemble;
-  limits.end = ghidra::Address(translator.getDefaultCodeSpace(), region.end);
+  limits.end = region.end;
 
   // What somebody said is not code stops the sweep, so that saying it has an
   // effect on the listing rather than only on a side table.
@@ -109,7 +123,7 @@ std::unique_ptr<Lifted> lift(const Region &region, uint64_t entry,
 
   auto lifted = std::make_unique<Lifted>();
   lifted->region = region;
-  lifted->cfg = build_cfg(translator, start, limits);
+  lifted->cfg = build_cfg(translator, start, *region.target->spaces, limits);
   return lifted->cfg.empty() ? nullptr : std::move(lifted);
 }
 
@@ -254,8 +268,23 @@ void Session::collect_starts() {
   starts_.clear();
   start_at_ = 0;
 
-  if (xrefs_ != nullptr)
-    starts_ = xrefs_->call_targets();
+  // A call target is a location -- space as well as offset -- and a start is
+  // an image address, so the two agree only where a region reads that space.
+  // A call into a region decoded with a different spec names that region's
+  // space, and folding its offset in here would start a function at whatever
+  // bytes happen to sit at the same offset in this one.
+  if (xrefs_ != nullptr) {
+    for (const Addr &target : xrefs_->call_targets()) {
+      if (target.space == kNoSpace)
+        continue;
+      for (const Region &region : regions_)
+        if (region.target != nullptr &&
+            target.space == region.target->code_space) {
+          starts_.push_back(target.offset);
+          break;
+        }
+    }
+  }
   if (elf_->entry != 0)
     starts_.push_back(elf_->entry);
   for (const auto &entry : elf_->functions)
@@ -773,8 +802,9 @@ Listing Session::listing(const ElfRange &range, const ListingRequest &request) {
   // Phi placement is pruned by liveness, so it has to be told what the caller
   // still reads -- otherwise the function's own result looks dead at the exit.
   SsaOptions options;
-  options.live_at_exit =
-      observable_storage(region.target->abi, region.target->translator);
+  options.live_at_exit = observable_storage(region.target->abi,
+                                           region.target->translator,
+                                           *region.target->spaces);
   SsaFunction fn = build_ssa(lifted->cfg, options);
 
   // The blocks of a function are regions inside it, the same way the function
@@ -789,8 +819,8 @@ Listing Session::listing(const ElfRange &range, const ListingRequest &request) {
       if (!fn.dominance().reachable(block.id))
         continue;
 
-      const uint64_t begin = block.start.getOffset();
-      const uint64_t end = block.end.getOffset();
+      const uint64_t begin = block.start;
+      const uint64_t end = block.end;
       if (end <= begin)
         continue;
 
@@ -866,7 +896,20 @@ void Session::build_xrefs() {
 const std::vector<Xref> &Session::xrefs_to(uint64_t address) {
   if (xrefs_ == nullptr)
     return no_xrefs();
-  return xrefs_->to(address);
+
+  // References are keyed by location -- space as well as offset -- so an
+  // image address has to become one before it can be looked up: the space of
+  // the region it sits in, or, for data no region decodes, the image's
+  // default reading.
+  Addr key{kNoSpace, address};
+  for (const Region &region : regions_)
+    if (address >= region.begin && address < region.end &&
+        region.target != nullptr)
+      key.space = region.target->code_space;
+  if (key.space == kNoSpace && prototype_.target != nullptr)
+    key.space = prototype_.target->code_space;
+
+  return xrefs_->to(key);
 }
 
 DataView Session::data(uint64_t address, uint64_t count) {
@@ -882,9 +925,9 @@ DataView Session::data(uint64_t address, uint64_t count) {
   //
   // Pointer width decides the natural item size: a literal pool on a 32-bit
   // target is words, on a 64-bit one it is doublewords.
-  unsigned word = 4;
-  if (prototype_.target != nullptr && prototype_.target->translator != nullptr)
-    word = prototype_.target->translator->getDefaultCodeSpace()->getAddrSize();
+  unsigned word = prototype_.target == nullptr
+                      ? 0
+                      : prototype_.target->pointer_size();
   if (word != 4 && word != 8)
     word = 4;
 
@@ -1109,13 +1152,13 @@ uint64_t Session::define_code(uint64_t address) {
 
   std::unique_ptr<Lifted> lifted =
       lift(region, address, max_instructions_, image_);
-  if (lifted == nullptr || lifted->cfg.empty() || lifted->cfg.entry < 0)
+  if (lifted == nullptr || lifted->cfg.empty() || !lifted->cfg.entry)
     return 0;
 
   // The first block, which is what "this is code" actually establishes: it
   // runs from here to the branch, call or return that ends it.
-  const BasicBlock &first = lifted->cfg.blocks[lifted->cfg.entry];
-  const uint64_t end = first.end.getOffset();
+  const BasicBlock &first = lifted->cfg.blocks[*lifted->cfg.entry];
+  const uint64_t end = first.end;
   if (end <= address)
     return 0;
 
@@ -1272,9 +1315,56 @@ void Session::define_data(uint64_t begin, uint64_t end) {
   save_project();
 }
 
+void Session::set_entry(uint64_t address) {
+  elf_->entry = address;
+  project_.set_entry(address);
+  save_project();
+
+  // It is a function start now, and the list of them is what discovery works
+  // through -- so it goes back on the list, and only it.
+  bounded_.erase(address);
+  collect_starts();
+  discovered_ = false;
+}
+
+bool Session::load_object(const std::string &path, uint64_t at,
+                          const std::string &spec, const std::string &abi,
+                          const std::string &stack_pointer) {
+  bool ok = false;
+  const std::vector<uint8_t> bytes = read_object(path, ok);
+  if (!ok || bytes.empty())
+    return false;
+
+  // Below the base would move every address in the image, and with them every
+  // note anybody has taken about one.
+  if (!image_->map(at, bytes))
+    return false;
+
+  // An object is a stretch of code until something says otherwise, and it has
+  // to be one for anything to disassemble it: regions are what carry the
+  // instruction set. The one the rest of the image uses is the default, since
+  // two objects of the same firmware are usually the same machine.
+  std::string wanted = spec;
+  if (wanted.empty() && prototype_.target != nullptr)
+    wanted = prototype_.target->name;
+
+  if (!add_region(at, at + bytes.size(), wanted, abi, stack_pointer))
+    return false;
+
+  // Recorded, so that opening the project again opens the same image rather
+  // than a region of zeroes where the second file used to be.
+  project_.add_object(Project::Object{path, at});
+  save_project();
+
+  log() << "mapped " << path << " (" << bytes.size() << " bytes) at 0x"
+        << std::hex << at << std::dec << "\n";
+  return true;
+}
+
 bool Session::add_region(uint64_t begin, uint64_t end, const std::string &spec,
                          const std::string &abi,
-                         const std::string &stack_pointer) {
+                         const std::string &stack_pointer,
+                         const std::vector<std::string> &context) {
   if (end <= begin || targets_ == nullptr)
     return false;
 
@@ -1283,7 +1373,7 @@ bool Session::add_region(uint64_t begin, uint64_t end, const std::string &spec,
           ? spec
           : spec_dir_ + "/" + spec + ".sla";
 
-  Target *target = targets_->acquire(path, abi, stack_pointer);
+  Target *target = targets_->acquire(path, abi, stack_pointer, context);
   if (target == nullptr)
     return false;
 
@@ -1307,8 +1397,97 @@ bool Session::add_region(uint64_t begin, uint64_t end, const std::string &spec,
   recorded.spec = spec;
   recorded.abi = abi;
   recorded.stack_pointer = stack_pointer;
+  recorded.context = context;
   project_.add_region(std::move(recorded));
   save_project();
+
+  return true;
+}
+
+std::vector<Session::SpecGuess> Session::detect_specs(int limit) {
+  std::vector<SpecGuess> found;
+  if (image_ == nullptr || image_->empty())
+    return found;
+
+  ExtractContext ctx;
+  ctx.spec_dir = spec_dir_;
+  ctx.out = log_;
+
+  for (const Finding &finding : extract(*image_, ctx, {"arch-detect"})) {
+    if (finding.suggested_spec.empty())
+      continue;
+
+    found.push_back(
+        SpecGuess{finding.suggested_spec, finding.confidence, finding.detail});
+    if (static_cast<int>(found.size()) >= limit)
+      break;
+  }
+
+  return found;
+}
+
+bool Session::retarget(uint64_t begin, const std::string &spec,
+                       const std::vector<std::string> &context,
+                       const std::string &abi,
+                       const std::string &stack_pointer) {
+  if (targets_ == nullptr || regions_.empty())
+    return false;
+
+  const std::string path =
+      spec.size() >= 4 && spec.compare(spec.size() - 4, 4, ".sla") == 0
+          ? spec
+          : spec_dir_ + "/" + spec + ".sla";
+
+  Target *target = targets_->acquire(path, abi, stack_pointer, context);
+  if (target == nullptr)
+    return false;
+
+  bool changed = false;
+  for (Region &region : regions_) {
+    if (region.kind != RegionKind::Code)
+      continue;
+    if (begin != 0 && !(begin >= region.begin && begin < region.end))
+      continue;
+
+    region.target = target;
+    region.name = target->name;
+    changed = true;
+
+    Project::RegionSpec recorded;
+    recorded.begin = region.begin;
+    recorded.end = region.end;
+    recorded.spec = spec;
+    recorded.abi = abi;
+    recorded.stack_pointer = stack_pointer;
+    recorded.context = context;
+    project_.add_region(std::move(recorded));
+  }
+
+  if (!changed)
+    return false;
+
+  prototype_ = regions_.front();
+
+  // Everything known about these bytes was worked out by reading them the
+  // other way: the functions, the references, the extents. None of it survives
+  // being told the instruction set was wrong.
+  found_.clear();
+  bounded_.clear();
+  starts_.clear();
+  discovered_ = false;
+  xrefs_.reset();
+  invalidate_index();
+
+  save_project();
+
+  log() << "reading as " << std::filesystem::path(path).stem().string();
+  if (!context.empty()) {
+    log() << " (";
+    for (size_t i = 0; i < context.size(); ++i)
+      log() << (i ? " " : "") << context[i];
+    log() << ")";
+  }
+  log() << '\n';
 
   return true;
 }
@@ -1330,6 +1509,22 @@ std::vector<std::string> Session::available_specs() const {
 }
 
 void Session::apply_project() {
+  if (project_.entry() != 0)
+    elf_->entry = project_.entry();
+
+  // The other files first: everything below is about addresses, and half of
+  // them are not in the image until the object that holds them is.
+  for (const Project::Object &object : project_.objects()) {
+    bool ok = false;
+    const std::vector<uint8_t> bytes = read_object(object.path, ok);
+    if (!ok) {
+      log() << "cannot read " << object.path << ", mapped at 0x" << std::hex
+            << object.at << std::dec << " by the project\n";
+      continue;
+    }
+    image_->map(object.at, bytes);
+  }
+
   for (const auto &range : project_.data_ranges())
     image_->mark_data(range.first, range.second);
 
@@ -1350,15 +1545,21 @@ void Session::apply_project() {
   }
 
   for (const Project::RegionSpec &region : project_.regions()) {
-    // Already there if the command line named the same stretch.
+    // Already there if the command line named the same stretch -- unless the
+    // project says to read it differently, which is a decision and outranks
+    // whatever the container claimed.
     bool known = false;
     for (const Region &existing : regions_)
       known = known || (existing.begin == region.begin && existing.end == region.end);
-    if (known)
+
+    if (known) {
+      retarget(region.begin, region.spec, region.context, region.abi,
+               region.stack_pointer);
       continue;
+    }
 
     add_region(region.begin, region.end, region.spec, region.abi,
-               region.stack_pointer);
+               region.stack_pointer, region.context);
   }
 }
 

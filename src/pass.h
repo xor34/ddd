@@ -52,9 +52,26 @@ struct PassContext {
 
   ghidra::Sleigh *translator() const;
   const CallingConvention *abi() const;
-  Storage stack_pointer() const;
+  Spaces *spaces() const;
+  Varnode stack_pointer() const;
 
   std::ostream &stream() const;
+
+  // ---- reporting ---------------------------------------------------------
+  //
+  // A pass does not print. What a pass found is a report, and the manager
+  // decides whether the caller wants to see it -- the session is usually
+  // drawing a screen, where a line of narration interleaved into the listing
+  // is noise nobody asked for.
+  //
+  // A pass with one fact to state returns it from Pass::report(); one that is
+  // discovering them as it goes appends here instead. Both end up in the same
+  // place, printed the same way.
+  void say(std::string line) { report_.push_back(std::move(line)); }
+
+  // Hands back everything said since the last call. The manager's, not a
+  // pass's: taking the buffer during run() would silently drop the lines.
+  std::vector<std::string> take_report() { return std::move(report_); }
 
   // Display names. With a translator these come out as real register names
   // ("RAX#3") instead of raw storage ("register:0x0:8#3").
@@ -64,7 +81,7 @@ struct PassContext {
   // it -- otherwise a copy would print as `x = COPY x`.
   std::string name_of(const SsaValue &value) const;
   std::string declaration_of(const SsaValue &value) const;
-  std::string name_of(const VarnodeData &vn) const;
+  std::string name_of(const Varnode &vn) const;
   std::string name_of(const SsaOperand &operand) const;
   // Operand by position, so the address-space constant of a LOAD/STORE comes
   // out as a space name rather than an encoded pointer.
@@ -73,6 +90,11 @@ struct PassContext {
   // written only once in the function, a note about where a value lives)
   // where the version would be noise rather than information.
   std::string base_name_of(const SsaValue &value) const;
+
+private:
+  // Lines PassContext::say() has collected. Private because it is the
+  // manager's to drain, not a pass's to read.
+  std::vector<std::string> report_;
 };
 
 class Pass {
@@ -81,7 +103,29 @@ public:
 
   virtual std::string name() const = 0;
   virtual std::string description() const { return {}; }
+
+  // Do the work. Anything a pass has to say about it goes through
+  // PassContext::say() or report(), never onto a stream: the caller may be
+  // drawing a screen, and has no way to interleave with a pass that writes
+  // into the middle of it.
   virtual void run(SsaFunction &fn, PassContext &ctx) = 0;
+
+  // What the pass wants said about what it did, one line each, read by the
+  // manager once run() has returned. Empty by default -- most passes have
+  // nothing to report but the listing they left behind.
+  //
+  // Called only when the caller asked for detail, which is the point of it
+  // being a call and not a buffer run() fills: describing what happened means
+  // naming values, and a pass that has to do real work to describe itself
+  // should do that work here, where it is only done for someone who wants it.
+  // A count costs nothing either way and can be kept in a member.
+  //
+  // The function and context are handed over because that naming needs both --
+  // the same reason run() takes them.
+  virtual std::vector<std::string> report(const SsaFunction &,
+                                          const PassContext &) const {
+    return {};
+  }
 };
 
 class PassRegistry {

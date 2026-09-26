@@ -51,7 +51,7 @@ template <typename Value> struct SparseAnalysis {
   std::function<Value()> init;
   // Fact for an operand that was not SSA-renamed (constants, memory).
   // Defaults to init().
-  std::function<Value(const VarnodeData &)> raw;
+  std::function<Value(const Varnode &)> raw;
   // Fact for a value defined before the function (parameter / uninitialised
   // read). Defaults to init(); most analyses want bottom here.
   std::function<Value(const SsaValue &)> live_in;
@@ -83,7 +83,7 @@ SparseResult<Value> solve(const SsaFunction &fn,
   ValueMap<Value> values(result.values, analysis);
 
   for (int i = 0; i < fn.value_count(); ++i) {
-    const SsaValue &value = fn.value(i);
+    const SsaValue &value = fn.value(ValueId{i});
     if (value.is_live_in() && analysis.live_in)
       result.values[i] = analysis.live_in(value);
   }

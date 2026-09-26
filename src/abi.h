@@ -38,6 +38,21 @@ struct CallingConvention {
   // which is what stops dead-code elimination from deleting the function's
   // own output.
   std::vector<std::string> preserved;
+
+  // Arguments the caller leaves on the stack rather than in registers.
+  //
+  // Which is all of them on 32-bit x86, and that is not a detail: a convention
+  // with no argument registers used to mean "nothing is known about this
+  // call", so a cdecl binary got no parameters at its entry and no arguments
+  // at any of its calls. `stack_offset` is where the first argument sits
+  // relative to the stack pointer on entry -- 4 on x86, past the return
+  // address the call instruction pushed -- and `stack_slot` is how much room
+  // each one takes.
+  int64_t stack_offset = 0;
+  unsigned stack_slot = 0; // 0: this convention passes nothing on the stack
+  int stack_count = 0;     // how many slots to look at before giving up
+
+  bool passes_on_stack() const { return stack_slot != 0 && stack_count > 0; }
 };
 
 const std::vector<CallingConvention> &conventions();
@@ -47,11 +62,22 @@ const CallingConvention *find_convention(const std::string &name);
 
 // First convention whose signature and argument registers all exist in the
 // loaded spec. Null if none match.
-const CallingConvention *guess_convention(ghidra::Sleigh &translator);
+const CallingConvention *guess_convention(ghidra::Sleigh &translator,
+                                          Spaces &spaces);
 
-// Storage for a register by name, or a zeroed Storage if the spec has no such
+// Storage for a register by name, or a zeroed Varnode if the spec has no such
 // register.
-Storage register_storage(ghidra::Sleigh &translator, const std::string &name);
+Varnode register_storage(ghidra::Sleigh &translator, Spaces &spaces,
+                         const std::string &name);
+
+// Machine state a write to is a side effect rather than a computation.
+//
+// Sleigh models `sti` as a write to the interrupt flag and `cld` as a write to
+// the direction flag, and nothing in the function reads either -- so dead-code
+// elimination, which is right about the arithmetic flags, deletes the one
+// instruction the line was there for. These are looked up by name and cost
+// nothing on an architecture that has no register of that name.
+const std::vector<std::string> &machine_flags();
 
 // Storage the caller can still read after a function returns: the result
 // register, the stack pointer and the callee-saved registers.
@@ -59,8 +85,9 @@ Storage register_storage(ghidra::Sleigh &translator, const std::string &name);
 // Needed in three places that must agree -- phi placement, dead-code
 // elimination and expression folding -- because all three otherwise mistake
 // the function's own output for something nobody wanted.
-std::vector<Storage> observable_storage(const CallingConvention *abi,
-                                        ghidra::Sleigh *translator);
+std::vector<Varnode> observable_storage(const CallingConvention *abi,
+                                        ghidra::Sleigh *translator,
+                                        Spaces &spaces);
 
 // Context a spec needs before it decodes the way its name suggests.
 //

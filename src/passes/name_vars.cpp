@@ -12,14 +12,16 @@
 // honest way to know that is to ask.
 //
 // Run it between `calling-conv` and `hil`.
+#include "../abi.h"
 #include "../hil.h"
 #include "../pass.h"
 
 #include <algorithm>
 #include <cctype>
 #include <map>
-#include <ostream>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace ddd {
 namespace {
@@ -63,8 +65,16 @@ public:
     seen_.clear();
     candidates_.clear();
     bases_.clear();
-    return_address_ = Storage{};
+    return_address_ = Varnode{};
     entry_ = fn.cfg().entry;
+
+    flags_.clear();
+    if (ctx.translator() != nullptr) {
+      for (const std::string &name : machine_flags()) {
+        Varnode storage = register_storage(*ctx.translator(), *ctx.spaces(), name);
+        if (storage.space != kNoSpace) flags_.insert(storage);
+      }
+    }
 
     Hil hil = build_hil(fn, ctx);
     argument_registers(ctx);
@@ -79,8 +89,12 @@ public:
       }
     }
 
-    const int named = assign(ctx);
-    if (ctx.verbose) ctx.stream() << "  named " << named << " variable(s)\n";
+    named_ = assign(ctx);
+  }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    return {"named " + std::to_string(named_) + " variable(s)"};
   }
 
 private:
@@ -97,12 +111,14 @@ private:
     if (ctx.abi() == nullptr || ctx.translator() == nullptr) return;
 
     for (size_t i = 0; i < ctx.abi()->arguments.size(); ++i) {
-      Storage storage = register_storage(*ctx.translator(), ctx.abi()->arguments[i]);
-      if (storage.space != nullptr) arguments_[storage] = static_cast<int>(i);
+      Varnode storage = register_storage(*ctx.translator(), *ctx.spaces(),
+                                         ctx.abi()->arguments[i]);
+      if (storage.space != kNoSpace) arguments_[storage] = static_cast<int>(i);
     }
 
     if (!ctx.abi()->return_address_register.empty())
-      return_address_ = register_storage(*ctx.translator(), ctx.abi()->return_address_register);
+      return_address_ = register_storage(*ctx.translator(), *ctx.spaces(),
+                                         ctx.abi()->return_address_register);
   }
 
   // First pass: which values need a name, and what they would be called.
@@ -116,6 +132,15 @@ private:
     Candidate candidate;
     candidate.value = &value;
     candidate.name = choose(value, ctx);
+
+    // Machine state keeps the name of the register it is.
+    //
+    // Two writes to the interrupt flag are not two variables taking turns in
+    // one register -- they are one piece of machine state, written twice, and
+    // `v1 = 0x1; v2 = 0x0` with a note saying both live in IF is a worse
+    // description of `sti; cli` than the register name it already had.
+    candidate.machine_flag = flags_.count(value.storage) != 0;
+    if (candidate.machine_flag) candidate.name = ctx.base_name_of(value);
     // A name taken from the storage is only a description of where the value
     // happens to be. Anything else -- a label, a parameter, a string it points
     // at -- is a description of what it *is*, and stands whatever else shares
@@ -148,6 +173,12 @@ private:
 
     for (const Candidate &candidate : candidates_) {
       std::string name = candidate.name;
+
+      if (candidate.machine_flag) {
+        ctx.annotations->set_display_name(*candidate.value, name);
+        ++named;
+        continue;
+      }
 
       if (candidate.from_storage && bases_[candidate.name] > 1) {
         name = "v" + std::to_string(++next);
@@ -184,7 +215,8 @@ private:
       if (i + kPerLine >= shown && notes.size() > shown)
         line += "; (+" + std::to_string(notes.size() - shown) + " more)";
 
-      ctx.annotations->comment_block(entry_, line);
+      if (entry_)
+        ctx.annotations->comment_block(*entry_, line);
     }
 
     return named;
@@ -196,7 +228,7 @@ private:
     if (ctx.annotations->has_label(value)) return ctx.annotations->label(value);
 
     if (value.is_live_in()) {
-      if (value.storage == return_address_ && return_address_.space != nullptr)
+      if (value.storage == return_address_ && return_address_.space != kNoSpace)
         return "retaddr";
 
       // A parameter is worth calling one; anything else read before it is
@@ -244,15 +276,18 @@ private:
     std::string name;    // what it would be called
     std::string storage; // where it lives, for the note
     bool from_storage = false;
+    bool machine_flag = false; // IF, DF: state, not a variable
   };
 
-  std::map<Storage, int> arguments_;
-  Storage return_address_;
+  int named_ = 0;
+  std::set<Varnode> flags_;
+  std::map<Varnode, int> arguments_;
+  Varnode return_address_;
   std::map<std::string, int> counts_;
-  std::set<int> seen_;
+  std::set<ValueId> seen_;
   std::vector<Candidate> candidates_;
   std::map<std::string, int> bases_;
-  int entry_ = 0;
+  std::optional<BlockId> entry_;
 };
 
 DDD_REGISTER_PASS(NameVars);

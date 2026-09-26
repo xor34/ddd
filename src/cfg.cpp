@@ -15,7 +15,13 @@
 // recovery), indirect call targets, CALLOTHER semantics (userop-table
 // specific, treated as a plain op), delay slots, and anything whose target
 // falls outside the swept range (no recursive descent).
+//
+// This file is front end: it is one of the two places libsla types appear
+// (pcode_in.h's conversion is the other), because Sleigh decodes through
+// them. Everything it stores leaves in the IR's own types.
 #include "cfg.h"
+
+#include "pcode_in.h"
 
 #include "error.hh"
 #include "sleigh.hh"
@@ -30,7 +36,7 @@ namespace ddd {
 namespace {
 
 struct SweptInstruction {
-  Address addr;
+  uint64_t addr = 0;
   ghidra::int4 length = 1;
   size_t first_op = 0;
   size_t op_count = 0;
@@ -42,7 +48,7 @@ class TextAssembly final : public ghidra::AssemblyEmit {
 public:
   std::string text;
 
-  void dump(const Address &, const std::string &mnemonic,
+  void dump(const ghidra::Address &, const std::string &mnemonic,
             const std::string &body) override {
     text = body.empty() ? mnemonic : mnemonic + " " + body;
   }
@@ -61,15 +67,21 @@ struct Sweep {
   // Disassembly text, kept alongside the p-code so the two can be shown
   // together.
   std::map<uint64_t, Instruction> decoded;
+
+  const Spaces *spaces = nullptr;
+  SpaceId code_space = kNoSpace; // the one space being swept
 };
 
-Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
-                         const SweepLimits &limits) {
+Sweep sweep_instructions(ghidra::Sleigh &translator, SpaceCache &space_cache,
+                         const ghidra::Address &start, const SweepLimits &limits,
+                         Spaces &spaces) {
   Sweep sweep;
-  Address addr = start;
+  sweep.spaces = &spaces;
+  sweep.code_space = space_cache.of(start.getSpace(), spaces);
+  ghidra::Address addr = start;
 
   for (int count = 0; count < limits.max_instructions; ++count) {
-    if (!limits.end.isInvalid() && !(addr < limits.end))
+    if (limits.end && !(addr.getOffset() < *limits.end))
       break;
     // Not code, and said so deliberately. Stopping rather than skipping is
     // right: whatever follows a jump table is reached by a branch, and if
@@ -77,7 +89,7 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
     if (limits.is_data && limits.is_data(addr.getOffset()))
       break;
 
-    PcodeCapture capture;
+    PcodeCapture capture(space_cache, spaces);
     TextAssembly text;
     ghidra::int4 length = 1;
     try {
@@ -94,14 +106,14 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
       length = 1;
 
     SweptInstruction instr;
-    instr.addr = addr;
+    instr.addr = addr.getOffset();
     instr.length = length;
     instr.first_op = sweep.ops.size();
     instr.op_count = capture.ops.size();
 
-    sweep.offset_to_op[addr.getOffset()] = instr.first_op;
-    sweep.decoded[addr.getOffset()] =
-        Instruction{addr, length, std::move(text.text)};
+    sweep.offset_to_op[instr.addr] = instr.first_op;
+    sweep.decoded[instr.addr] =
+        Instruction{instr.addr, length, std::move(text.text)};
     sweep.instructions.push_back(instr);
 
     for (PcodeOp &op : capture.ops)
@@ -121,7 +133,7 @@ Sweep sweep_instructions(ghidra::Sleigh &translator, const Address &start,
 // Resolves a branch destination varnode to an index into sweep.ops, or -1 if
 // it can't be resolved statically (dynamic target, or outside the sweep).
 long long resolve_target(const Sweep &sweep, size_t op_index,
-                         const VarnodeData &dest) {
+                         const Varnode &dest) {
   if (is_constant(dest)) {
     // p-code-relative: signed offset from this op's index within its own
     // instruction's op list.
@@ -135,7 +147,15 @@ long long resolve_target(const Sweep &sweep, size_t op_index,
     return static_cast<long long>(instr.first_op + static_cast<size_t>(target));
   }
 
-  auto it = sweep.offset_to_op.find(static_cast<uint64_t>(dest.offset));
+  // The destination varnode names the space it branches into, which this
+  // sweep only knows how to follow when it is the space it swept. A branch
+  // to any other space is not a miss that might still hit by offset -- the
+  // same offset in a different space is a different place -- so it does not
+  // resolve here, and `leaves_to` carries the full location instead.
+  if (dest.space != sweep.code_space)
+    return -1;
+
+  auto it = sweep.offset_to_op.find(dest.offset);
   if (it == sweep.offset_to_op.end())
     return -1;
   if (it->second >= sweep.ops.size())
@@ -154,7 +174,7 @@ std::vector<size_t> find_leaders(const Sweep &sweep) {
     if (i + 1 < sweep.ops.size())
       leaders.insert(i + 1);
 
-    if ((op.opc == ghidra::CPUI_BRANCH || op.opc == ghidra::CPUI_CBRANCH) &&
+    if ((op.opc == Op::BRANCH || op.opc == Op::CBRANCH) &&
         !op.inputs.empty()) {
       long long target = resolve_target(sweep, i, op.inputs[0]);
       if (target >= 0)
@@ -167,8 +187,8 @@ std::vector<size_t> find_leaders(const Sweep &sweep) {
 
 } // namespace
 
-const Instruction *Cfg::instruction_at(const Address &addr) const {
-  auto it = instructions.find(static_cast<uint64_t>(addr.getOffset()));
+const Instruction *Cfg::instruction_at(uint64_t addr) const {
+  auto it = instructions.find(addr);
   return it == instructions.end() ? nullptr : &it->second;
 }
 
@@ -180,13 +200,19 @@ void Cfg::refresh_preds() {
       blocks[e.target].preds.push_back(b.id);
 }
 
-Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
+Cfg build_cfg(ghidra::Sleigh &translator, uint64_t start, Spaces &spaces,
               const SweepLimits &limits) {
   Cfg cfg;
+  cfg.spaces = &spaces;
 
-  Sweep sweep = sweep_instructions(translator, start, limits);
+  // The sweep is the only thing that needs libsla's Address; everything it
+  // stores is already plain uint64_t offsets in the one space it swept.
+  const ghidra::Address begin(translator.getDefaultCodeSpace(), start);
+  SpaceCache space_cache;
+  Sweep sweep = sweep_instructions(translator, space_cache, begin, limits, spaces);
   if (sweep.ops.empty())
     return cfg;
+  cfg.code_space = sweep.code_space;
 
   std::vector<size_t> leaders = find_leaders(sweep);
 
@@ -208,11 +234,11 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
       continue;
 
     BasicBlock block;
-    block.id = cfg.size();
+    block.id = BlockId{cfg.size()};
     block.start = sweep.ops[begin].addr;
     const SweptInstruction &last =
         sweep.instructions[sweep.op_to_instruction[end - 1]];
-    block.end = last.addr + last.length;
+    block.end = last.addr + static_cast<uint64_t>(last.length);
     block.ops.assign(sweep.ops.begin() + begin, sweep.ops.begin() + end);
 
     ranges.push_back({begin, end});
@@ -220,9 +246,9 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
   }
   if (cfg.empty())
     return cfg;
-  cfg.entry = 0;
+  cfg.entry = BlockId{0};
   cfg.instructions = std::move(sweep.decoded);
-  cfg.code_begin = static_cast<uint64_t>(start.getOffset());
+  cfg.code_begin = start;
   cfg.code_end = cfg.instructions.empty()
                      ? cfg.code_begin
                      : cfg.instructions.rbegin()->first +
@@ -233,70 +259,73 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
     const Range &range = ranges[i];
     const PcodeOp &last = sweep.ops[range.end - 1];
 
-    auto fallthrough = [&]() -> int {
+    auto fallthrough = [&]() -> std::optional<BlockId> {
       if (range.end >= sweep.ops.size())
-        return -1;
-      return block_of_op(range.end);
+        return std::nullopt;
+      return BlockId{block_of_op(range.end)};
     };
-    auto branch_target = [&]() -> int {
+    auto branch_target = [&]() -> std::optional<BlockId> {
       if (last.inputs.empty())
-        return -1;
+        return std::nullopt;
       long long target = resolve_target(sweep, range.end - 1, last.inputs[0]);
-      return target < 0 ? -1 : block_of_op(static_cast<size_t>(target));
+      if (target < 0)
+        return std::nullopt;
+      return BlockId{block_of_op(static_cast<size_t>(target))};
     };
-    // The address a branch names when this sweep does not contain it. An
+    // The location a branch names when this sweep does not contain it. An
     // absolute destination is an address whether or not it was swept -- a tail
-    // call is exactly this, and so is a jump into the function next door -- and
-    // only a p-code-relative one (an intra-instruction branch, which cannot
+    // call is exactly this, and so is a jump into the function next door --
+    // with the space it names, which may not be this one; and only a
+    // p-code-relative destination (an intra-instruction branch, which cannot
     // leave the instruction) has nothing to say here.
-    auto leaves_to = [&]() -> uint64_t {
+    auto leaves_to = [&]() -> Addr {
       if (last.inputs.empty() || is_constant(last.inputs[0]))
-        return 0;
-      return static_cast<uint64_t>(last.inputs[0].offset);
+        return {};
+      return {last.inputs[0].space, last.inputs[0].offset};
     };
 
     switch (last.opc) {
-    case ghidra::CPUI_RETURN:
+    case Op::RETURN:
       block.ends_in_return = true;
       break;
 
-    case ghidra::CPUI_BRANCH:
+    case Op::BRANCH:
       block.ends_in_branch = true;
-      if (int t = branch_target(); t >= 0)
-        block.succs.push_back({t, false});
+      if (auto t = branch_target())
+        block.succs.push_back({*t, false});
       else
         block.leaves_to = leaves_to();
       break;
 
-    case ghidra::CPUI_CBRANCH:
+    case Op::CBRANCH:
       block.ends_in_branch = true;
-      if (int t = branch_target(); t >= 0)
-        block.succs.push_back({t, true});
+      if (auto t = branch_target())
+        block.succs.push_back({*t, true});
       else
         block.leaves_to = leaves_to();
-      if (int f = fallthrough(); f >= 0)
-        block.succs.push_back({f, false});
+      if (auto f = fallthrough())
+        block.succs.push_back({*f, false});
       break;
 
-    case ghidra::CPUI_BRANCHIND:
+    case Op::BRANCHIND:
       block.ends_in_branch = true;
       // Jump table: destination is a runtime value. No static successors.
       break;
 
-    case ghidra::CPUI_CALL:
-    case ghidra::CPUI_CALLIND:
+    case Op::CALL:
+    case Op::CALLIND:
       block.ends_in_call = true;
       // Assume the callee returns; there is no interprocedural noreturn
       // analysis here.
-      if (int f = fallthrough(); f >= 0)
-        block.succs.push_back({f, false});
+      if (auto f = fallthrough())
+        block.succs.push_back({*f, false});
       break;
 
     default:
       // The block ended here because something else branches to the next op,
       // not because `last` is a control-flow op: plain fall-through.
-      if (int f = fallthrough(); f >= 0)
-        block.succs.push_back({f, false});
+      if (auto f = fallthrough())
+        block.succs.push_back({*f, false});
       break;
     }
   }
@@ -308,10 +337,15 @@ Cfg build_cfg(ghidra::Sleigh &translator, const Address &start,
 std::string to_string(const Cfg &cfg) {
   std::ostringstream os;
 
+  // A hand-built Cfg with no spaces behind it can still be dumped; the
+  // varnodes print as bare space ids.
+  static const Spaces kNoSpaces;
+  const Spaces &spaces = cfg.spaces != nullptr ? *cfg.spaces : kNoSpaces;
+
   for (const BasicBlock &block : cfg.blocks) {
-    os << "block " << block.id << "  [0x" << std::hex << block.start.getOffset()
-       << ", 0x" << block.end.getOffset() << ")" << std::dec;
-    if (block.id == cfg.entry)
+    os << "block " << block.id << "  [0x" << std::hex << block.start << ", 0x"
+       << block.end << ")" << std::dec;
+    if (cfg.entry == block.id)
       os << " entry";
     if (block.ends_in_call)
       os << " call";
@@ -319,26 +353,25 @@ std::string to_string(const Cfg &cfg) {
       os << " return";
     if (block.ends_in_branch)
       os << " branch";
-    if (block.leaves_to != 0)
-      os << " leaves 0x" << std::hex << block.leaves_to << std::dec;
+    if (block.leaves_to.space != kNoSpace)
+      os << " leaves " << to_string(block.leaves_to, spaces);
     os << "\n";
 
     uint64_t shown = ~uint64_t(0);
     for (const PcodeOp &op : block.ops) {
-      uint64_t at = static_cast<uint64_t>(op.addr.getOffset());
-      if (at != shown) {
-        shown = at;
+      if (op.addr != shown) {
+        shown = op.addr;
         const Instruction *instr = cfg.instruction_at(op.addr);
-        os << "  0x" << std::hex << at << std::dec << "  "
+        os << "  0x" << std::hex << op.addr << std::dec << "  "
            << (instr != nullptr ? instr->text : "") << "\n";
       }
 
       os << "      ";
       if (op.has_output)
-        os << to_string(op.output) << " = ";
-      os << ghidra::get_opname(op.opc);
-      for (const VarnodeData &in : op.inputs)
-        os << ' ' << to_string(in);
+        os << to_string(op.output, spaces) << " = ";
+      os << op_name(op.opc);
+      for (const Varnode &in : op.inputs)
+        os << ' ' << to_string(in, spaces);
       os << "\n";
     }
 

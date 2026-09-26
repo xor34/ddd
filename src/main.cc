@@ -416,10 +416,10 @@ referenced_functions(const ddd::Cfg &cfg,
 
   for (const ddd::BasicBlock &block : cfg.blocks) {
     for (const ddd::PcodeOp &op : block.ops) {
-      if (op.opc == ghidra::CPUI_CALL && !op.inputs.empty())
+      if (op.opc == ddd::Op::CALL && !op.inputs.empty())
         consider(op.inputs[0].offset);
 
-      for (const ddd::VarnodeData &in : op.inputs)
+      for (const ddd::Varnode &in : op.inputs)
         if (ddd::is_constant(in))
           consider(in.offset);
     }
@@ -444,8 +444,8 @@ void analyse(const ddd::Lifted &lifted, const ddd::Image &image,
   // Phi placement is pruned by liveness, so it has to be told what the caller
   // still reads -- otherwise the function's own result looks dead at the exit.
   ddd::SsaOptions options;
-  options.live_at_exit =
-      ddd::observable_storage(region.target->abi, region.target->translator);
+  options.live_at_exit = ddd::observable_storage(
+      region.target->abi, region.target->translator, *region.target->spaces);
 
   ddd::SsaFunction fn = ddd::build_ssa(lifted.cfg, options);
   ddd::Annotations annotations;
@@ -591,11 +591,37 @@ int main(int argc, char **argv) {
     }
   }
 
-  // No container and no explicit regions: the whole image is one, with --sla.
+  // No container and no explicit regions: the whole image is one.
+  //
+  // With --sla it is read as that; without one the bytes are asked what they
+  // are. A blob is exactly the case with nothing to name its own architecture,
+  // and "need --sla" is a poor answer when trial disassembly settles it in a
+  // second -- so the guess is made, said out loud, and --sla remains the way to
+  // overrule it.
   if (regions.empty()) {
-    const std::string spec = absl::GetFlag(FLAGS_sla);
+    std::string spec = absl::GetFlag(FLAGS_sla);
+
     if (spec.empty()) {
-      std::cerr << "need --sla, or one or more --region\n";
+      ddd::ExtractContext detect;
+      detect.spec_dir = spec_dir;
+      detect.candidate_specs = absl::GetFlag(FLAGS_try_specs);
+      detect.out = &std::cerr;
+
+      for (const ddd::Finding &finding :
+           ddd::extract(image, detect, {"arch-detect"})) {
+        if (finding.suggested_spec.empty())
+          continue;
+        spec = finding.suggested_spec;
+        std::cerr << "no --sla: reading this as " << spec << " ("
+                  << finding.detail << ", confidence "
+                  << static_cast<int>(finding.confidence * 100) << "%)\n";
+        break;
+      }
+    }
+
+    if (spec.empty()) {
+      std::cerr << "nothing here decodes as any installed spec; pass --sla, "
+                   "or one or more --region\n";
       return 2;
     }
 

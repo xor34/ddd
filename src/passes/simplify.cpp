@@ -18,7 +18,8 @@
 // the operand that refers back to the phi itself makes it trivial.
 #include "../pass.h"
 
-#include <ostream>
+#include <string>
+#include <vector>
 
 namespace ddd {
 namespace {
@@ -31,7 +32,7 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
-    const int removed = remove_ops_to_fixpoint(
+    removed_ = remove_ops_to_fixpoint(
         fn,
         [&](SsaOp *phi) {
           SsaValue *replacement = trivial_result(*phi);
@@ -41,11 +42,16 @@ public:
           return true;
         },
         {&SsaBlock::phis});
+  }
 
-    if (ctx.verbose) ctx.stream() << "  removed " << removed << " trivial phi(s)\n";
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    return {"removed " + std::to_string(removed_) + " trivial phi(s)"};
   }
 
 private:
+  int removed_ = 0;
+
   // The single value a phi always yields, or null if it is a real choice.
   static SsaValue *trivial_result(const SsaOp &phi) {
     if (phi.out == nullptr || phi.ins.empty()) return nullptr;

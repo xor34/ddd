@@ -1,12 +1,3 @@
-// elf.h -- the one container format worth teaching this tool.
-//
-// Everything else here works on a flat image and is told where the code is.
-// An ELF already knows: which bytes are code, where they live in memory, what
-// architecture they are for, where execution starts, and -- if it was not
-// stripped -- what the functions are called. All of that is otherwise a guess.
-//
-// This is a reader, not a linker. It does not relocate, resolve, or follow
-// dynamic linkage; it answers "what is in this file and where does it go".
 #pragma once
 
 #include "image.h"

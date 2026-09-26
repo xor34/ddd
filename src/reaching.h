@@ -24,17 +24,17 @@ public:
 
   // The value of `storage` just before `op` executes, or null if nothing
   // reaches it (unreachable block, or storage that is never defined or read).
-  SsaValue *before(const SsaOp &op, const Storage &storage) const;
+  SsaValue *before(const SsaOp &op, const Varnode &storage) const;
 
   // The value of `storage` at the top of `block`.
-  SsaValue *at_entry(int block, const Storage &storage) const;
+  SsaValue *at_entry(BlockId block, const Varnode &storage) const;
 
   // The value of `storage` after everything in `block` has run.
-  SsaValue *at_exit(int block, const Storage &storage) const;
+  SsaValue *at_exit(BlockId block, const Varnode &storage) const;
 
 private:
   const SsaFunction &fn_;
-  std::vector<std::unordered_map<Storage, SsaValue *, StorageHash>> entry_;
+  std::vector<std::unordered_map<Varnode, SsaValue *, VarnodeHash>> entry_;
 };
 
 // Ids of the values something outside this function can see. Two sources,
@@ -51,6 +51,7 @@ private:
 // arguments it sets up must be mistaken for something nobody wanted.
 //
 // Empty when there is no calling convention to ask.
-std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx);
+std::set<ValueId> observable_values(const SsaFunction &fn,
+                                    const PassContext &ctx);
 
 } // namespace ddd

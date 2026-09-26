@@ -35,7 +35,7 @@ inline bool is_slot_label(const std::string &label) {
 class Annotations {
 public:
   void comment(const SsaOp &op, std::string text);
-  void comment_block(int block, std::string text);
+  void comment_block(BlockId block, std::string text);
   void set_label(const SsaValue &value, std::string label);
 
   // Record that `value` is the same variable as `source` -- what a COPY
@@ -52,7 +52,7 @@ public:
   const SsaValue &canonical(const SsaValue &value) const;
 
   const std::vector<std::string> &comments(const SsaOp &op) const;
-  const std::vector<std::string> &block_comments(int block) const;
+  const std::vector<std::string> &block_comments(BlockId block) const;
 
   // Empty when the value has no label; callers fall back to its storage name.
   const std::string &label(const SsaValue &value) const;
@@ -84,12 +84,12 @@ public:
   void clear();
 
 private:
-  std::map<int, std::vector<std::string>> op_comments_;
-  std::map<int, std::vector<std::string>> block_comments_;
-  std::map<int, std::string> labels_;
-  std::map<int, const SsaValue *> aliases_;
-  std::map<int, std::string> display_names_;
-  std::set<int> plumbing_;
+  std::map<OpId, std::vector<std::string>> op_comments_;
+  std::map<BlockId, std::vector<std::string>> block_comments_;
+  std::map<ValueId, std::string> labels_;
+  std::map<ValueId, const SsaValue *> aliases_;
+  std::map<ValueId, std::string> display_names_;
+  std::set<OpId> plumbing_;
 };
 
 } // namespace ddd

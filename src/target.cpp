@@ -26,12 +26,33 @@ std::vector<std::string> split(const std::string &text, char separator) {
   return parts;
 }
 
+// A context database that remembers what the spec asked it to hold.
+//
+// Which context variables a spec has is not a question Sleigh answers: the
+// names live in the .sla and the database keeps them privately. But it is told
+// each one as the spec is read -- that is what registerVariable is -- so
+// listening is enough, and an interface can then offer `longMode` and
+// `addrsize` by name instead of expecting them to be known already.
+class RecordingContext final : public ghidra::ContextInternal {
+public:
+  void registerVariable(const std::string &name, ghidra::int4 sbit,
+                        ghidra::int4 ebit) override {
+    ghidra::ContextInternal::registerVariable(name, sbit, ebit);
+    names_.push_back(name);
+  }
+
+  const std::vector<std::string> &names() const { return names_; }
+
+private:
+  std::vector<std::string> names_;
+};
+
 } // namespace
 
 struct TargetSet::Instance {
   std::string spec;
   std::vector<std::string> context;
-  std::unique_ptr<ghidra::ContextInternal> ghidra_context;
+  std::unique_ptr<RecordingContext> ghidra_context;
   std::unique_ptr<ghidra::Sleigh> sleigh;
 };
 
@@ -67,7 +88,7 @@ TargetSet::load(const std::string &spec,
   auto instance = std::make_unique<Instance>();
   instance->spec = spec;
   instance->context = context;
-  instance->ghidra_context = std::make_unique<ghidra::ContextInternal>();
+  instance->ghidra_context = std::make_unique<RecordingContext>();
   instance->sleigh = std::make_unique<ghidra::Sleigh>(
       loader_.get(), instance->ghidra_context.get());
 
@@ -195,11 +216,12 @@ void TargetSet::build_workers() {
       Target view = original;
       view.decode_only = true;
       view.translator = nullptr;
-      // Nothing a sweep needs, and everything that would be wrong if a pass
-      // ever saw it: these name storage, and storage from another instance is
-      // another pointer. See the comment on Target::decode_only.
+      // Nothing a sweep needs, and everything that would mislead anything
+      // else: a worker's translator is this worker's own, and the pipeline
+      // should read conventions and register names from the original. See
+      // the comment on Target::decode_only.
       view.abi = nullptr;
-      view.stack_pointer = Storage{};
+      view.stack_pointer = Varnode{};
 
       for (size_t i = 0; i < specs.size(); ++i) {
         if (specs[i].first != original.spec || specs[i].second != original.context)
@@ -275,10 +297,14 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
   Target target;
   target.spec = spec;
   target.context = effective;
+  target.context_variables = instance->ghidra_context->names();
   target.translator = instance->sleigh.get();
+  target.spaces = &spaces_;
+  target.code_space = spaces_.intern(
+      target.translator->getDefaultCodeSpace()->getName(), SpaceKind::Other);
 
-  target.abi =
-      abi.empty() ? guess_convention(*target.translator) : find_convention(abi);
+  target.abi = abi.empty() ? guess_convention(*target.translator, spaces_)
+                           : find_convention(abi);
   if (!abi.empty() && target.abi == nullptr) {
     std::cerr << "unknown abi: " << abi << "\n  known:";
     for (const CallingConvention &c : conventions())
@@ -290,8 +316,8 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
   if (sp.empty() && target.abi != nullptr)
     sp = target.abi->stack_pointer;
   if (!sp.empty()) {
-    target.stack_pointer = register_storage(*target.translator, sp);
-    if (target.stack_pointer.space == nullptr)
+    target.stack_pointer = register_storage(*target.translator, spaces_, sp);
+    if (target.stack_pointer.space == kNoSpace)
       std::cerr << "no such register: " << sp << '\n';
   }
 
@@ -312,6 +338,12 @@ Target *TargetSet::acquire(const std::string &spec, const std::string &abi,
   wake_.notify_all();
 
   return &targets_.back();
+}
+
+uint32_t Target::pointer_size() const {
+  if (translator == nullptr)
+    return 0;
+  return translator->getDefaultCodeSpace()->getAddrSize();
 }
 
 bool parse_region(const std::string &text, TargetSet &targets,

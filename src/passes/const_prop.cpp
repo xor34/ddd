@@ -6,9 +6,7 @@
 #include "../pass.h"
 #include "../sparse.h"
 
-#include "opcodes.hh"
-
-#include <ostream>
+#include <sstream>
 
 namespace ddd {
 namespace {
@@ -43,8 +41,7 @@ uint32_t operand_size(const SsaOp &op, size_t i) {
   const SsaOperand &operand = op.ins[i];
   if (operand.value != nullptr)
     return operand.value->storage.size;
-  return operand.raw.space != nullptr ? static_cast<uint32_t>(operand.raw.size)
-                                      : 8;
+  return operand.raw.space != kNoSpace ? operand.raw.size : 8;
 }
 
 // Returns Bottom for anything not modelled -- the conservative direction.
@@ -69,36 +66,36 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
 
   uint64_t a = 0, b = 0;
   switch (op.opc) {
-  case ghidra::CPUI_COPY:
+  case Op::COPY:
     return unary(a) ? truncated(a) : Const::bottom();
 
-  case ghidra::CPUI_INT_ADD:
+  case Op::INT_ADD:
     return binary(a, b) ? truncated(a + b) : Const::bottom();
-  case ghidra::CPUI_INT_SUB:
+  case Op::INT_SUB:
     return binary(a, b) ? truncated(a - b) : Const::bottom();
-  case ghidra::CPUI_INT_MULT:
+  case Op::INT_MULT:
     return binary(a, b) ? truncated(a * b) : Const::bottom();
-  case ghidra::CPUI_INT_AND:
+  case Op::INT_AND:
     return binary(a, b) ? truncated(a & b) : Const::bottom();
-  case ghidra::CPUI_INT_OR:
+  case Op::INT_OR:
     return binary(a, b) ? truncated(a | b) : Const::bottom();
-  case ghidra::CPUI_INT_XOR:
+  case Op::INT_XOR:
     return binary(a, b) ? truncated(a ^ b) : Const::bottom();
-  case ghidra::CPUI_INT_NEGATE:
+  case Op::INT_NEGATE:
     return unary(a) ? truncated(~a) : Const::bottom();
-  case ghidra::CPUI_INT_2COMP:
+  case Op::INT_2COMP:
     return unary(a) ? truncated(~a + 1) : Const::bottom();
 
-  case ghidra::CPUI_INT_LEFT:
+  case Op::INT_LEFT:
     if (!binary(a, b))
       return Const::bottom();
     return b >= 64 ? truncated(0) : truncated(a << b);
-  case ghidra::CPUI_INT_RIGHT:
+  case Op::INT_RIGHT:
     if (!binary(a, b))
       return Const::bottom();
     return b >= 64 ? truncated(0)
                    : truncated((a & mask_for(operand_size(op, 0))) >> b);
-  case ghidra::CPUI_INT_SRIGHT:
+  case Op::INT_SRIGHT:
     if (!binary(a, b))
       return Const::bottom();
     if (b >= 64)
@@ -106,22 +103,22 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
     return truncated(static_cast<uint64_t>(
         static_cast<int64_t>(sign_extend(a, operand_size(op, 0))) >> b));
 
-  case ghidra::CPUI_INT_ZEXT:
+  case Op::INT_ZEXT:
     return unary(a) ? truncated(a & mask_for(operand_size(op, 0)))
                     : Const::bottom();
-  case ghidra::CPUI_INT_SEXT:
+  case Op::INT_SEXT:
     return unary(a) ? truncated(sign_extend(a, operand_size(op, 0)))
                     : Const::bottom();
 
-  case ghidra::CPUI_INT_EQUAL:
+  case Op::INT_EQUAL:
     return binary(a, b) ? Const::known(a == b ? 1 : 0) : Const::bottom();
-  case ghidra::CPUI_INT_NOTEQUAL:
+  case Op::INT_NOTEQUAL:
     return binary(a, b) ? Const::known(a != b ? 1 : 0) : Const::bottom();
-  case ghidra::CPUI_INT_LESS:
+  case Op::INT_LESS:
     return binary(a, b) ? Const::known(a < b ? 1 : 0) : Const::bottom();
-  case ghidra::CPUI_INT_LESSEQUAL:
+  case Op::INT_LESSEQUAL:
     return binary(a, b) ? Const::known(a <= b ? 1 : 0) : Const::bottom();
-  case ghidra::CPUI_INT_SLESS:
+  case Op::INT_SLESS:
     if (!binary(a, b))
       return Const::bottom();
     return Const::known(
@@ -130,16 +127,16 @@ Const evaluate(const SsaOp &op, const std::vector<Const> &in) {
             ? 1
             : 0);
 
-  case ghidra::CPUI_BOOL_NEGATE:
+  case Op::BOOL_NEGATE:
     return unary(a) ? Const::known(a ? 0 : 1) : Const::bottom();
-  case ghidra::CPUI_BOOL_AND:
+  case Op::BOOL_AND:
     return binary(a, b) ? Const::known((a && b) ? 1 : 0) : Const::bottom();
-  case ghidra::CPUI_BOOL_OR:
+  case Op::BOOL_OR:
     return binary(a, b) ? Const::known((a || b) ? 1 : 0) : Const::bottom();
-  case ghidra::CPUI_BOOL_XOR:
+  case Op::BOOL_XOR:
     return binary(a, b) ? Const::known((!!a != !!b) ? 1 : 0) : Const::bottom();
 
-  case ghidra::CPUI_SUBPIECE:
+  case Op::SUBPIECE:
     if (!binary(a, b))
       return Const::bottom();
     return truncated(b >= 8 ? 0 : (a >> (b * 8)));
@@ -156,7 +153,7 @@ SparseAnalysis<Const> build_analysis() {
 
   // Constants are where facts enter the analysis; anything else we chose not
   // to rename (memory) is unknown.
-  analysis.raw = [](const VarnodeData &vn) {
+  analysis.raw = [](const Varnode &vn) {
     return is_constant(vn) ? Const::known(vn.offset) : Const::bottom();
   };
 
@@ -194,28 +191,41 @@ public:
     return "sparse constant propagation over def-use chains";
   }
 
-  void run(SsaFunction &fn, PassContext &ctx) override {
-    SparseAnalysis<Const> analysis = build_analysis();
-    SparseResult<Const> result = solve(fn, analysis);
+  void run(SsaFunction &fn, PassContext &) override {
+    result_ = solve(fn, build_analysis());
+  }
 
-    std::ostream &os = ctx.stream();
+  // Walked again rather than collected during run(): the lattice is what the
+  // pass computes, the lines are a description of it, and a description is
+  // only worth building for someone reading one.
+  std::vector<std::string> report(const SsaFunction &fn,
+                                  const PassContext &ctx) const override {
+    std::vector<std::string> lines;
     int constants = 0;
 
     fn.for_each_op([&](const SsaOp &op) {
-      if (op.out == nullptr)
-        return;
-      const Const &value = result[*op.out];
-      if (value.state != Const::Known)
-        return;
+      if (op.out == nullptr) return;
+      const Const &value = result_[*op.out];
+      if (value.state != Const::Known) return;
 
       ++constants;
-      os << "    " << ctx.name_of(*op.out) << " = 0x" << std::hex << value.value
-         << std::dec << "  (block " << op.block << ")\n";
+
+      // The block is on the line because a value is only constant where the
+      // lattice says so, and which block this def sits in is how the two are
+      // checked against each other.
+      std::ostringstream line;
+      line << ctx.name_of(*op.out) << " = 0x" << std::hex << value.value
+           << std::dec << "  (block " << op.block << ")";
+      lines.push_back(line.str());
     });
 
-    os << "  " << constants << " constant value(s) of " << fn.value_count()
-       << "\n";
+    lines.push_back(std::to_string(constants) + " constant value(s) of " +
+                    std::to_string(fn.value_count()));
+    return lines;
   }
+
+private:
+  SparseResult<Const> result_;
 };
 
 DDD_REGISTER_PASS(ConstProp);

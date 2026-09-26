@@ -10,7 +10,7 @@ const SsaOp *skip_copies(const SsaValue *value) {
   const SsaOp *def = value != nullptr ? value->def : nullptr;
 
   for (int guard = 0; def != nullptr && guard < 64; ++guard) {
-    if (def->opc != ghidra::CPUI_COPY || def->ins.size() != 1) return def;
+    if (def->opc != Op::COPY || def->ins.size() != 1) return def;
     if (!def->ins[0].is_tracked()) return def;
     def = def->ins[0].value->def;
   }

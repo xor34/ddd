@@ -136,18 +136,70 @@ end
 
 -- ---- moving around -------------------------------------------------------
 
+-- Where you are, for the history: the line the cursor is on, not the address
+-- the last jump happened to land on.
+--
+-- Those are the same thing only until you move. Scrolling down forty lines and
+-- following a call from there and pressing escape has to come back to that
+-- call -- coming back to the top of the function you were in is coming back to
+-- somewhere you have not been since you arrived, and then the call you were
+-- reading has to be found again by hand.
+local function standing_at(self)
+  return self.focus or self.addr
+end
+
+-- Whether two addresses are different *places*.
+--
+-- The history is worth having only if going back goes somewhere else. Two
+-- addresses in one function are one place: you can see both, and pressing
+-- escape to move eleven lines is not what anybody means by back. Outside a
+-- function -- a blob, a data region -- there is nothing to group by but
+-- distance, and a screenful is the same rule by another route.
+local kFarEnough = 512
+
+local function elsewhere(self, from, to)
+  if not from or not to then return true end
+
+  local here = self.session.function_at(from)
+  local there = self.session.function_at(to)
+  if here and there then return here.addr ~= there.addr end
+  if here or there then return true end
+
+  return math.abs(to - from) > kFarEnough
+end
+
+-- Remembering one place, rather than every address on the way to it.
+--
+-- Jumping about inside a function -- following a branch, coming back, following
+-- another -- is one entry that keeps moving, not eight. Otherwise getting out
+-- of a function you have been reading for a minute is eight presses of escape,
+-- each landing somewhere you can already see, which is the same as having no
+-- history at all.
+local function remember(self, list, addr)
+  if not addr then return end
+
+  local top = list[#list]
+  if top and not elsewhere(self, top, addr) then
+    list[#list] = addr
+  else
+    list[#list + 1] = addr
+  end
+end
+
 -- Navigating somewhere records where you were, which is what makes going back
 -- possible -- the single most-used thing in any disassembler.
 function Context:navigate(addr, options)
   options = options or {}
   if not addr then return false end
 
-  if self.addr and self.addr ~= addr and not options.replace then
-    self.history[#self.history + 1] = self.addr
+  local from = standing_at(self)
+  if from and from ~= addr and not options.replace then
+    remember(self, self.history, from)
     self.future = {}
   end
 
   self.addr = addr
+  self.focus = addr
   self.func = self.session.function_at(addr)
   self:emit("navigate", addr, self.func)
   return true
@@ -167,8 +219,9 @@ function Context:back()
   local previous = table.remove(self.history)
   if not previous then return false end
 
-  self.future[#self.future + 1] = self.addr
+  remember(self, self.future, standing_at(self))
   self.addr = previous
+  self.focus = previous
   self.func = self.session.function_at(previous)
   self:emit("navigate", previous, self.func)
   return true
@@ -178,8 +231,9 @@ function Context:forward()
   local next_addr = table.remove(self.future)
   if not next_addr then return false end
 
-  self.history[#self.history + 1] = self.addr
+  remember(self, self.history, standing_at(self))
   self.addr = next_addr
+  self.focus = next_addr
   self.func = self.session.function_at(next_addr)
   self:emit("navigate", next_addr, self.func)
   return true

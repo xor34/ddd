@@ -14,8 +14,6 @@
 #include "../pattern.h"
 #include "lua_util.h"
 
-#include "opcodes.hh"
-
 #include <new>
 
 namespace ddd {
@@ -48,15 +46,15 @@ int check_slot(lua_State *L, int index) {
 }
 
 // Either a name ("INT_XOR") or a number out of ddd.opcodes.
-OpCode check_opcode(lua_State *L, int index) {
+Op check_opcode(lua_State *L, int index) {
   if (lua_type(L, index) == LUA_TNUMBER)
-    return static_cast<OpCode>(luaL_checkinteger(L, index));
+    return static_cast<Op>(luaL_checkinteger(L, index));
 
   const std::string name = check_string(L, index);
-  OpCode opc = ghidra::get_opcode(name);
-  if (opc == static_cast<OpCode>(0))
+  const std::optional<Op> opc = op_from_name(name);
+  if (!opc)
     luaL_error(L, "no p-code opcode called '%s'", name.c_str());
-  return opc;
+  return *opc;
 }
 
 int pat_val(lua_State *L) {
@@ -94,7 +92,7 @@ void collect(lua_State *L, int index, Pattern &into) {
 }
 
 int pat_op(lua_State *L) {
-  const OpCode opc = check_opcode(L, 1);
+  const Op opc = check_opcode(L, 1);
 
   Pattern built;
   built.kind = Pattern::Kind::Op;
@@ -108,7 +106,7 @@ int pat_op(lua_State *L) {
 }
 
 int pat_comm(lua_State *L) {
-  const OpCode opc = check_opcode(L, 1);
+  const Op opc = check_opcode(L, 1);
   Pattern left = *check_pattern(L, 2);
   Pattern right = *check_pattern(L, 3);
 

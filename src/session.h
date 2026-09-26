@@ -126,6 +126,11 @@ public:
   std::string describe() const { return elf_->describe(); }
   uint64_t entry() const { return elf_->entry; }
 
+  // Saying where the code starts, when the file does not say or says wrong.
+  // Discovery treats the entry point as a function start, so this is how a blob
+  // with one obvious beginning gets analysed from it. Recorded in the project.
+  void set_entry(uint64_t address);
+
   // The convention in force where new functions are lifted, if one is known.
   // An interface offering to write a prototype needs the argument registers to
   // suggest.
@@ -313,10 +318,54 @@ public:
   // Returns false if the spec will not load.
   bool add_region(uint64_t begin, uint64_t end, const std::string &spec,
                   const std::string &abi = {},
-                  const std::string &stack_pointer = {});
+                  const std::string &stack_pointer = {},
+                  const std::vector<std::string> &context = {});
+
+  // Another file, mapped into this image at an address, with a region over it
+  // so that it disassembles. What an image made of several objects needs: a
+  // bootloader and an application, a firmware and the blob it calls into.
+  //
+  // The spec defaults to the one the rest of the image uses. Recorded in the
+  // project, so opening it again opens the same image. False if the file
+  // cannot be read, if it would land below the base of the image, or if the
+  // spec will not load.
+  bool load_object(const std::string &path, uint64_t at,
+                   const std::string &spec = {}, const std::string &abi = {},
+                   const std::string &stack_pointer = {});
+
+  // What instruction set these bytes look like, best first.
+  //
+  // For a file with a container the question is already answered -- an ELF
+  // names its machine -- and this is for everything else: a blob, a firmware
+  // dump, a stretch inside one that is plainly something else. It is trial
+  // disassembly, so it costs a Sleigh load per candidate and says how sure it
+  // is rather than pretending to know.
+  struct SpecGuess {
+    std::string spec;
+    double confidence = 0;
+    std::string detail;
+  };
+
+  std::vector<SpecGuess> detect_specs(int limit = 5);
+
+  // Reading a stretch with a different instruction set, or the same one in a
+  // different mode.
+  //
+  // The context is what `--ctx` passes: NAME=VALUE settings the spec declares,
+  // like `longMode=1` on x86. Everything the old target decided is dropped --
+  // the functions found through it, the references indexed from it -- because
+  // all of it came from reading these bytes the wrong way.
+  //
+  // `begin` names the region; zero means every code region, which is what a
+  // blob wrongly identified needs.
+  bool retarget(uint64_t begin, const std::string &spec,
+                const std::vector<std::string> &context,
+                const std::string &abi = {},
+                const std::string &stack_pointer = {});
 
   // Where bare spec names are resolved, for add_region.
   void set_spec_dir(std::string dir) { spec_dir_ = std::move(dir); }
+  const std::string &spec_dir() const { return spec_dir_; }
   // The specs that are actually installed, for an interface offering a choice.
   std::vector<std::string> available_specs() const;
 

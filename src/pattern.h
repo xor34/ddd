@@ -1,7 +1,7 @@
 // pattern.h -- a small matcher over the SSA graph, for recognising idioms.
 //
 //   using namespace ddd::pat;
-//   Pattern zeroing = op(CPUI_INT_XOR, val(0), val(0));  // same value twice
+//   Pattern zeroing = op(Op::INT_XOR, val(0), val(0));  // same value twice
 //
 //   Match m;
 //   if (zeroing.match(some_op, m)) ...  // m.value(0) is what got zeroed
@@ -52,7 +52,7 @@ struct Pattern {
   };
 
   Kind kind = Kind::Value;
-  OpCode opc = ghidra::CPUI_COPY;
+  Op opc = Op::COPY;
   uint64_t constant = 0;
   int slot = 0;
   bool commutative = false;
@@ -69,12 +69,12 @@ inline Pattern val(int slot) { return {Pattern::Kind::Value, {}, 0, slot, false,
 inline Pattern imm(uint64_t value) { return {Pattern::Kind::Constant, {}, value, 0, false, {}}; }
 inline Pattern cst(int slot) { return {Pattern::Kind::AnyConst, {}, 0, slot, false, {}}; }
 
-inline Pattern op(OpCode opc, std::initializer_list<Pattern> ins) {
+inline Pattern op(Op opc, std::initializer_list<Pattern> ins) {
   return {Pattern::Kind::Op, opc, 0, 0, false, ins};
 }
 
 // Same as op(), but also matches with the two operands swapped.
-inline Pattern comm(OpCode opc, Pattern left, Pattern right) {
+inline Pattern comm(Op opc, Pattern left, Pattern right) {
   return {Pattern::Kind::Op, opc, 0, 0, true, {std::move(left), std::move(right)}};
 }
 

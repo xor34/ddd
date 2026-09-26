@@ -5,8 +5,6 @@
 // last.
 #include "../pass.h"
 
-#include "opcodes.hh"
-
 #include <ostream>
 
 namespace ddd {
@@ -31,11 +29,10 @@ public:
       // as annotated disassembly rather than a flat stream of p-code.
       uint64_t shown = ~uint64_t(0);
       for (const SsaOp *op : block.ops) {
-        uint64_t at = static_cast<uint64_t>(op->addr.getOffset());
-        if (at != shown) {
-          shown = at;
+        if (op->addr != shown) {
+          shown = op->addr;
           const Instruction *instr = cfg.instruction_at(op->addr);
-          os << "  0x" << std::hex << at << std::dec << "  "
+          os << "  0x" << std::hex << op->addr << std::dec << "  "
              << (instr != nullptr ? instr->text : "") << "\n";
         }
         print_op(os, ctx, *op);
@@ -57,7 +54,7 @@ private:
     os << "  preds:";
     if (raw.preds.empty())
       os << " -";
-    for (int p : raw.preds)
+    for (BlockId p : raw.preds)
       os << ' ' << p;
     os << "  succs:";
     if (raw.succs.empty())
@@ -92,7 +89,7 @@ private:
     } else if (op.has_raw_output) {
       os << ctx.name_of(op.raw_output) << " = ";
     }
-    os << ghidra::get_opname(op.opc);
+    os << op_name(op.opc);
     for (size_t i = 0; i < op.ins.size(); ++i)
       os << ' ' << ctx.name_of(op, i);
     print_comments(os, ctx, op);

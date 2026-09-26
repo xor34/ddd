@@ -342,9 +342,11 @@ ddd.workflow "studio" {
       end,
     }
 
+    -- Not ctrl+d: that is half a page down, in this window as in every other
+    -- thing you read with a keyboard.
     scope.command "define-data" {
       title = "This is not code",
-      key = "<control>d",
+      key = "<alt>d",
       run = function(ui)
         local addr = selected_address(ui)
         if not addr then return end
@@ -418,6 +420,15 @@ ddd.workflow "studio" {
       key = "<alt>Right",
       run = function(ui)
         if not ui:forward() then ui:status("nowhere to go forward to") end
+      end,
+    }
+
+    -- Space, because that is the key everybody's hand goes to for this.
+    scope.command "graph" {
+      title = "Graph or listing",
+      key = "space",
+      run = function(ui)
+        ui:emit("show", ui.page == "graph" and "listing" or "graph")
       end,
     }
 

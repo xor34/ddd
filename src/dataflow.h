@@ -62,25 +62,25 @@ BlockResult<Fact> solve(const SsaFunction &fn,
 
   // Reverse postorder converges fastest forwards, its reverse backwards.
   // Unreachable blocks are not in the rpo, so append them.
-  std::vector<int> order = dom.rpo;
+  std::vector<BlockId> order = dom.rpo;
   for (int b = 0; b < n; ++b)
-    if (!dom.reachable(b))
-      order.push_back(b);
+    if (!dom.reachable(BlockId{b}))
+      order.push_back(BlockId{b});
   if (!forward)
     std::reverse(order.begin(), order.end());
 
-  std::deque<int> worklist(order.begin(), order.end());
+  std::deque<BlockId> worklist(order.begin(), order.end());
   std::vector<bool> queued(n, true);
 
   while (!worklist.empty()) {
-    int b = worklist.front();
+    BlockId b = worklist.front();
     worklist.pop_front();
     queued[b] = false;
 
     Fact incoming = analysis.init();
     bool first = true;
     if (forward) {
-      for (int p : cfg[b].preds) {
+      for (BlockId p : cfg[b].preds) {
         incoming =
             first ? result.out[p] : analysis.merge(incoming, result.out[p]);
         first = false;
@@ -101,7 +101,7 @@ BlockResult<Fact> solve(const SsaFunction &fn,
       continue;
     slot = std::move(outgoing);
 
-    auto enqueue = [&](int next) {
+    auto enqueue = [&](BlockId next) {
       if (queued[next])
         return;
       queued[next] = true;
@@ -111,7 +111,7 @@ BlockResult<Fact> solve(const SsaFunction &fn,
       for (const Edge &e : cfg[b].succs)
         enqueue(e.target);
     } else {
-      for (int p : cfg[b].preds)
+      for (BlockId p : cfg[b].preds)
         enqueue(p);
     }
   }

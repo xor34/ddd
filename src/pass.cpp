@@ -9,16 +9,29 @@
 namespace ddd {
 namespace {
 
-std::string storage_name(const PassContext &ctx, AddrSpace *space,
+// Register name for a storage, through the translator of the target the
+// function was lifted with. Space identity being by *name* is what makes this
+// sound: the id resolves to the same register bank in any decoder of the
+// spec, so this is a display lookup, not an identity comparison.
+std::string storage_name(const PassContext &ctx, SpaceId space,
                          uint64_t offset, uint32_t size) {
-  if (space == nullptr)
+  if (space == kNoSpace)
     return "?";
-  if (ctx.translator() != nullptr) {
-    std::string reg = ctx.translator()->getRegisterName(space, offset, size);
-    if (!reg.empty())
-      return reg;
+  if (ctx.translator() != nullptr && ctx.spaces() != nullptr) {
+    ghidra::AddrSpace *spc =
+        ctx.translator()->getSpaceByName(ctx.spaces()->name(space));
+    if (spc != nullptr) {
+      std::string reg = ctx.translator()->getRegisterName(spc, offset, size);
+      if (!reg.empty())
+        return reg;
+    }
   }
-  return to_string(Storage{space, offset, size});
+  if (ctx.spaces() != nullptr)
+    return to_string(Varnode{space, offset, size}, *ctx.spaces());
+  std::ostringstream os;
+  os << "space" << space << ":0x" << std::hex << offset << ":" << std::dec
+     << size;
+  return os.str();
 }
 
 } // namespace
@@ -31,8 +44,12 @@ const CallingConvention *PassContext::abi() const {
   return target != nullptr ? target->abi : nullptr;
 }
 
-Storage PassContext::stack_pointer() const {
-  return target != nullptr ? target->stack_pointer : Storage{};
+Spaces *PassContext::spaces() const {
+  return target != nullptr ? target->spaces : nullptr;
+}
+
+Varnode PassContext::stack_pointer() const {
+  return target != nullptr ? target->stack_pointer : Varnode{};
 }
 
 std::ostream &PassContext::stream() const {
@@ -54,26 +71,25 @@ std::string PassContext::name_of(const SsaValue &value) const {
 std::string PassContext::declaration_of(const SsaValue &value) const {
   const std::string *label =
       annotations != nullptr ? &annotations->label(value) : nullptr;
-  std::string base =
-      (label != nullptr && !label->empty())
-          ? *label
-          : storage_name(*this, value.storage.space, value.storage.offset,
-                         value.storage.size);
+  std::string base = (label != nullptr && !label->empty())
+                         ? *label
+                         : storage_name(*this, value.storage.space,
+                                        value.storage.offset,
+                                        value.storage.size);
   if (value.is_live_in())
     return base + "#in";
   return base + "#" + std::to_string(value.version);
 }
 
-std::string PassContext::name_of(const VarnodeData &vn) const {
-  if (vn.space == nullptr)
+std::string PassContext::name_of(const Varnode &vn) const {
+  if (vn.space == kNoSpace)
     return "?";
   if (is_constant(vn)) {
     std::ostringstream os;
     os << "0x" << std::hex << vn.offset;
     return os.str();
   }
-  return storage_name(*this, vn.space, static_cast<uint64_t>(vn.offset),
-                      static_cast<uint32_t>(vn.size));
+  return storage_name(*this, vn.space, vn.offset, vn.size);
 }
 
 std::string PassContext::name_of(const SsaOperand &operand) const {
@@ -91,11 +107,11 @@ std::string PassContext::base_name_of(const SsaValue &value) const {
 std::string PassContext::name_of(const SsaOp &op, size_t index) const {
   const SsaOperand &operand = op.ins[index];
 
-  if (is_space_operand(op, index) && operand.is_constant()) {
-    AddrSpace *space = operand.raw.getSpaceFromConst();
-    if (space != nullptr)
-      return space->getName();
-  }
+  // The address-space operand of a LOAD/STORE: its offset is the SpaceId of
+  // the space it operates on, so the name is just a lookup.
+  if (is_space_operand(op, index) && operand.is_constant() &&
+      spaces() != nullptr)
+    return spaces()->name(static_cast<SpaceId>(operand.raw.offset));
 
   return name_of(operand);
 }
@@ -140,7 +156,19 @@ void PassManager::run(SsaFunction &fn, PassContext &ctx) const {
   for (const std::shared_ptr<Pass> &pass : passes_) {
     if (ctx.verbose)
       ctx.stream() << "== " << pass->name() << " ==\n";
+
+    // Anything a previous pass left in the buffer is stale by definition --
+    // this pass has not run yet.
+    ctx.take_report();
+
     pass->run(fn, ctx);
+    if (!ctx.verbose)
+      continue;
+
+    for (const std::string &line : ctx.take_report())
+      ctx.stream() << "  " << line << "\n";
+    for (const std::string &line : pass->report(fn, ctx))
+      ctx.stream() << "  " << line << "\n";
   }
 }
 

@@ -11,8 +11,6 @@
 #include "../pass.h"
 #include "../sparse.h"
 
-#include "opcodes.hh"
-
 #include <map>
 #include <ostream>
 #include <set>
@@ -54,12 +52,12 @@ StackValue evaluate(const SsaOp &op, const StackValue &a, const StackValue &b) {
   const bool b_num = b.state == StackValue::Number;
 
   switch (op.opc) {
-  case ghidra::CPUI_COPY:
-  case ghidra::CPUI_INT_ZEXT:
-  case ghidra::CPUI_INT_SEXT:
+  case Op::COPY:
+  case Op::INT_ZEXT:
+  case Op::INT_SEXT:
     return a;
 
-  case ghidra::CPUI_INT_ADD: {
+  case Op::INT_ADD: {
     if (a_frame && b_num) {
       return StackValue::frame(a.value + b.value);
     }
@@ -75,7 +73,7 @@ StackValue evaluate(const SsaOp &op, const StackValue &a, const StackValue &b) {
     return StackValue::bottom();
   }
 
-  case ghidra::CPUI_INT_SUB: {
+  case Op::INT_SUB: {
     if (a_frame && b_num) {
       return StackValue::frame(a.value - b.value);
     }
@@ -92,12 +90,12 @@ StackValue evaluate(const SsaOp &op, const StackValue &a, const StackValue &b) {
   }
 }
 
-SparseAnalysis<StackValue> build_analysis(const Storage &stack_pointer) {
+SparseAnalysis<StackValue> build_analysis(const Varnode &stack_pointer) {
   SparseAnalysis<StackValue> analysis;
 
   analysis.init = [] { return StackValue{}; };
 
-  analysis.raw = [](const VarnodeData &vn) {
+  analysis.raw = [](const Varnode &vn) {
     if (!is_constant(vn))
       return StackValue::bottom();
     // Stack offsets arrive as unsigned constants that are really negative in
@@ -164,13 +162,12 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
-    if (ctx.stack_pointer().space == nullptr) {
-      if (ctx.verbose)
-        ctx.stream() << "  no stack pointer known, skipping\n";
+    if (ctx.stack_pointer().space == kNoSpace) {
+      slots_ = -1; // tells report() there was nothing to look at
       return;
     }
 
-    const Storage stack_pointer = ctx.stack_pointer();
+    const Varnode stack_pointer = ctx.stack_pointer();
     SparseResult<StackValue> result = solve(fn, build_analysis(stack_pointer));
 
     // offset -> widest access seen there
@@ -184,8 +181,8 @@ public:
 
     fn.for_each_op([&](SsaOp &op) {
       // LOAD: out = *ins[1]. STORE: *ins[1] = ins[2]. ins[0] is the space id.
-      const bool load = op.opc == ghidra::CPUI_LOAD;
-      const bool store = op.opc == ghidra::CPUI_STORE;
+      const bool load = op.opc == Op::LOAD;
+      const bool store = op.opc == Op::STORE;
       if (!load && !store) {
         label_frame_pointer(ctx, op, result);
         return;
@@ -222,7 +219,15 @@ public:
                                        frame_expression(address.value) + "]");
     });
 
-    report(fn, ctx, slots, saved);
+    annotate(fn, ctx, slots, saved);
+    slots_ = static_cast<int>(slots.size());
+  }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    if (slots_ < 0) return {"no stack pointer known, skipping"};
+    if (slots_ == 0) return {"no stack slots found"};
+    return {std::to_string(slots_) + " stack slot(s)"};
   }
 
 private:
@@ -249,17 +254,17 @@ private:
     // *argument* register also stores a live-in value to a frame slot, but
     // that slot holds a parameter -- a real variable of the program -- and
     // hiding it would lose argc and argv.
-    std::set<Storage> preserved;
+    std::set<Varnode> preserved;
     if (ctx.abi() != nullptr && ctx.translator() != nullptr) {
       for (const std::string &name : ctx.abi()->preserved) {
-        Storage storage = register_storage(*ctx.translator(), name);
-        if (storage.space != nullptr) preserved.insert(storage);
+        Varnode storage = register_storage(*ctx.translator(), *ctx.spaces(), name);
+        if (storage.space != kNoSpace) preserved.insert(storage);
       }
     }
     if (preserved.empty()) return;
 
     fn.for_each_op([&](SsaOp &op) {
-      if (op.opc != ghidra::CPUI_STORE || op.ins.size() < 3) return;
+      if (op.opc != Op::STORE || op.ins.size() < 3) return;
       if (!op.ins[1].is_tracked() || !op.ins[2].is_tracked()) return;
 
       const StackValue &address = result[*op.ins[1].value];
@@ -281,7 +286,7 @@ private:
   static const SsaValue *original(const SsaValue *value) {
     for (int guard = 0; guard < 64 && value != nullptr; ++guard) {
       const SsaOp *def = value->def;
-      if (def == nullptr || def->opc != ghidra::CPUI_COPY || def->ins.size() != 1)
+      if (def == nullptr || def->opc != Op::COPY || def->ins.size() != 1)
         return value;
       if (!def->ins[0].is_tracked()) return value;
       value = def->ins[0].value;
@@ -289,22 +294,25 @@ private:
     return value;
   }
 
-  static void report(const SsaFunction &fn, PassContext &ctx,
-                     const std::map<int64_t, unsigned> &slots,
-                     const std::map<int64_t, std::string> &saved) {
+  // Writes the frame layout into the entry block's comments. That is output
+  // the listing shows, not a report about the pass -- a reader looking at the
+  // function wants to know where its variables live, whether or not they asked
+  // this pass to describe itself.
+  void annotate(const SsaFunction &fn, PassContext &ctx,
+                const std::map<int64_t, unsigned> &slots,
+                const std::map<int64_t, std::string> &saved) {
+    if (!fn.cfg().entry)
+      return;
+
     if (!saved.empty()) {
       std::ostringstream registers;
       registers << "saves:";
       for (const auto &entry : saved)
         registers << " " << entry.second.substr(6); // drop the "saved_"
-      ctx.annotations->comment_block(fn.cfg().entry, registers.str());
+      ctx.annotations->comment_block(*fn.cfg().entry, registers.str());
     }
 
-    if (slots.empty()) {
-      if (ctx.verbose)
-        ctx.stream() << "  no stack slots found\n";
-      return;
-    }
+    if (slots.empty()) return;
 
     std::ostringstream layout;
     layout << "frame:";
@@ -312,11 +320,13 @@ private:
       layout << " " << slot_name(slot.first, ctx.abi()) << "[" << slot.second
              << "]";
     }
-    ctx.annotations->comment_block(fn.cfg().entry, layout.str());
-
-    if (ctx.verbose)
-      ctx.stream() << "  " << slots.size() << " stack slot(s)\n";
+    ctx.annotations->comment_block(*fn.cfg().entry, layout.str());
   }
+
+  // How many slots were found, or -1 when there was no stack pointer to look
+  // for them relative to. A count is all report() needs, so the layout above
+  // is not kept alive to describe it.
+  int slots_ = 0;
 };
 
 DDD_REGISTER_PASS(StackVars);

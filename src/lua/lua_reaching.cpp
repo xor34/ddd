@@ -9,14 +9,10 @@
 //
 //   local reaching = ddd.reaching(fn, ctx)
 //   local value = reaching:before(op, "RDI")
-#include "../abi.h"
 #include "../pass.h"
 #include "../reaching.h"
 #include "../ssa.h"
-#include "../target.h"
 #include "lua_util.h"
-
-#include "sleigh.hh"
 
 #include <new>
 
@@ -27,25 +23,27 @@ namespace {
 constexpr const char *kReaching = "ddd.reaching";
 
 // Holds the analysis and what it needs to turn a register name into storage.
+// The context rather than the translator: a register is looked up by name and
+// interning that name is what produces the storage identity, and the Spaces
+// table the context carries is the one the function's own varnodes were
+// interned into.
 struct Bound {
   ReachingValues values;
-  ghidra::Sleigh *translator;
+  PassContext *ctx;
   const SsaFunction *fn;
 
-  Bound(const SsaFunction &function, ghidra::Sleigh *sleigh)
-      : values(function), translator(sleigh), fn(&function) {}
+  Bound(const SsaFunction &function, PassContext *context)
+      : values(function), ctx(context), fn(&function) {}
 };
 
 Bound *check_bound(lua_State *L, int index) {
   return static_cast<Bound *>(luaL_checkudata(L, index, kReaching));
 }
 
-// A register by name, or a zeroed storage the callers all treat as "no such
+// A register by name, or a zeroed Varnode the callers all treat as "no such
 // register".
-Storage storage_of(lua_State *L, Bound &bound, int index) {
-  if (bound.translator == nullptr)
-    return {};
-  return register_storage(*bound.translator, check_string(L, index));
+Varnode storage_of(lua_State *L, Bound &bound, int index) {
+  return lookup_register(*bound.ctx, check_string(L, index));
 }
 
 int reaching_gc(lua_State *L) {
@@ -56,9 +54,9 @@ int reaching_gc(lua_State *L) {
 // The register-name argument every method here takes last, resolved to
 // storage. Pushes nil and returns false for one that names nothing -- which
 // none of the callers can answer for -- so a caller just returns on failure.
-bool resolve_storage(lua_State *L, Bound &bound, int index, Storage &storage) {
+bool resolve_storage(lua_State *L, Bound &bound, int index, Varnode &storage) {
   storage = storage_of(L, bound, index);
-  if (storage.space != nullptr)
+  if (storage.space != kNoSpace)
     return true;
   lua_pushnil(L);
   return false;
@@ -68,7 +66,7 @@ int reaching_before(lua_State *L) {
   Bound *bound = check_bound(L, 1);
   SsaOp *op = check_op(L, 2);
 
-  Storage storage;
+  Varnode storage;
   if (!resolve_storage(L, *bound, 3, storage))
     return 1;
 
@@ -78,9 +76,9 @@ int reaching_before(lua_State *L) {
 
 int reaching_at_entry(lua_State *L) {
   Bound *bound = check_bound(L, 1);
-  const int block = static_cast<int>(luaL_checkinteger(L, 2));
+  const BlockId block(static_cast<int>(luaL_checkinteger(L, 2)));
 
-  Storage storage;
+  Varnode storage;
   if (!resolve_storage(L, *bound, 3, storage))
     return 1;
 
@@ -90,9 +88,9 @@ int reaching_at_entry(lua_State *L) {
 
 int reaching_at_exit(lua_State *L) {
   Bound *bound = check_bound(L, 1);
-  const int block = static_cast<int>(luaL_checkinteger(L, 2));
+  const BlockId block(static_cast<int>(luaL_checkinteger(L, 2)));
 
-  Storage storage;
+  Varnode storage;
   if (!resolve_storage(L, *bound, 3, storage))
     return 1;
 
@@ -105,15 +103,15 @@ int reaching_at_exit(lua_State *L) {
 int reaching_live_in(lua_State *L) {
   Bound *bound = check_bound(L, 1);
 
-  const Storage storage = storage_of(L, *bound, 2);
-  if (storage.space == nullptr) {
+  const Varnode storage = storage_of(L, *bound, 2);
+  if (storage.space == kNoSpace) {
     lua_pushnil(L);
     return 1;
   }
 
   SsaFunction &fn = const_cast<SsaFunction &>(*bound->fn);
   for (int i = 0; i < fn.value_count(); ++i) {
-    SsaValue &value = fn.value(i);
+    SsaValue &value = fn.value(ValueId(i));
     if (value.is_live_in() && value.storage == storage) {
       push_value(L, &value);
       return 1;
@@ -138,7 +136,7 @@ int make_reaching(lua_State *L) {
   PassContext *ctx = check_context(L, 2);
 
   void *memory = lua_newuserdatauv(L, sizeof(Bound), 0);
-  new (memory) Bound(*fn, ctx->translator());
+  new (memory) Bound(*fn, ctx);
   luaL_setmetatable(L, kReaching);
   return 1;
 }

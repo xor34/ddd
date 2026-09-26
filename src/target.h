@@ -41,21 +41,44 @@ struct Target {
   std::string name; // display name, e.g. "AARCH64" or "x86:real"
   std::string spec; // path to the .sla
   std::vector<std::string> context; // NAME=VALUE, as passed to Sleigh
+
+  // Every context variable this spec has, in the order it declared them --
+  // `longMode`, `addrsize`, `opsize` on x86, `TMode` on ARM. What an interface
+  // needs to offer the choice rather than expect it to be known.
+  std::vector<std::string> context_variables;
   ghidra::Sleigh *translator = nullptr;
   const CallingConvention *abi = nullptr;
-  Storage stack_pointer; // zeroed if unknown
+  Varnode stack_pointer; // zeroed if unknown
+
+  // Where every varnode decoded through this target lives, and the names to
+  // print them with. Owned by the TargetSet; every decode interns into the
+  // same table, so storage from this target and storage from its worker
+  // copies compare equal -- the identity SSA renames on is the value, not the
+  // decoder that produced it.
+  Spaces *spaces = nullptr;
+
+  // The space this target's code lives in -- the spec's default code space,
+  // as an id in `spaces`. The sweep runs there, and image offsets under this
+  // target mean offsets in it; it is what turns a flat image address back
+  // into a location (Addr{code_space, offset}) for looking things up.
+  SpaceId code_space = kNoSpace;
+
+  // How wide an address here is, in bytes -- 4 or 8. The one thing about a
+  // spec that is genuinely a property of the machine rather than of a
+  // location in it, so it is asked of the target rather than of a Cfg: a
+  // literal pool is words on a 32-bit target and doublewords on a 64-bit one.
+  // 0 when there is no translator to ask.
+  uint32_t pointer_size() const;
 
   // This one is a worker's copy, and may only be used to sweep bytes for what
   // is at an address: where the instructions are, what they refer to, where
   // control flow stops.
   //
-  // Not for anything the pass pipeline sees. Every Sleigh instance builds its
-  // own AddrSpaces, so `RAX` decoded through a copy is a different pointer
-  // from `RAX` looked up through the original -- and Storage identity, which
-  // is what SSA renames on and what every pass compares against the argument
-  // and stack-pointer registers, is that pointer. The two would silently fail
-  // to match. Addresses are plain integers and have no such problem, which is
-  // why the threaded stages hand back addresses and nothing else.
+  // Not for anything the pass pipeline sees. Storage identity is shared
+  // (see `spaces`), so that is no longer the reason -- but a worker's
+  // Sleigh is private to the thread it was built for, and the pipeline also
+  // reads its target for register names and conventions, which the original
+  // alone should answer. See PassManager::run, which refuses these.
   bool decode_only = false;
 };
 
@@ -77,6 +100,11 @@ public:
                   const std::string &name = "");
 
   const std::deque<Target> &targets() const { return targets_; }
+
+  // The space table every decode through this TargetSet interns into -- one
+  // per image, so all its targets (and their worker copies) agree on space
+  // identity.
+  Spaces &spaces() { return spaces_; }
 
   // ---- decoding on more than one thread ---------------------------------
   //
@@ -116,6 +144,7 @@ private:
   std::unique_ptr<ImageLoader> loader_;
   std::vector<std::unique_ptr<Instance>> instances_;
   std::deque<Target> targets_;
+  Spaces spaces_;
 
   // Held while a spec is parsed, by whichever thread is doing it: Sleigh's XML
   // reader keeps the scanner and the content handler in globals, so two

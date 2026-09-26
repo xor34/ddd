@@ -1,8 +1,19 @@
 #include "xrefs.h"
 
-#include "opcodes.hh"
-
 namespace ddd {
+namespace {
+
+// What a destination varnode names. A branch or call names the space it goes
+// into outright; a constant is a raw value, and reading one as a reference is
+// reading it as an address in the space the code itself lives in -- which is
+// the only space a flat image address has ever meant.
+Addr destination(const Cfg &cfg, const Varnode &vn) {
+  if (is_constant(vn))
+    return {cfg.code_space, vn.offset};
+  return {vn.space, vn.offset};
+}
+
+} // namespace
 
 void Xrefs::add(const Cfg &cfg, const std::string &function, uint64_t first,
                 uint64_t last, uint64_t inside_begin, uint64_t inside_end) {
@@ -11,7 +22,7 @@ void Xrefs::add(const Cfg &cfg, const std::string &function, uint64_t first,
     inside_end = cfg.code_end;
   }
 
-  auto record = [&](uint64_t from, uint64_t to, const char *kind) {
+  auto record = [&](uint64_t from, const Addr &to, const char *kind) {
     Xref xref;
     xref.from = from;
     xref.to = to;
@@ -23,31 +34,40 @@ void Xrefs::add(const Cfg &cfg, const std::string &function, uint64_t first,
 
   for (const BasicBlock &block : cfg.blocks) {
     for (const PcodeOp &op : block.ops) {
-      const uint64_t from = op.addr.getOffset();
+      const uint64_t from = op.addr;
       if (from < first || from >= last)
         continue;
 
       switch (op.opc) {
-      case ghidra::CPUI_CALL:
-        if (!op.inputs.empty()) record(from, op.inputs[0].offset, "call");
+      case Op::CALL:
+        if (!op.inputs.empty())
+          record(from, destination(cfg, op.inputs[0]), "call");
         break;
 
-      case ghidra::CPUI_BRANCH:
-      case ghidra::CPUI_CBRANCH:
+      case Op::BRANCH:
+      case Op::CBRANCH: {
         // Only branches leaving this function are worth indexing; the ones
-        // inside it are the control flow the listing already draws.
-        if (!op.inputs.empty() && !is_constant(op.inputs[0]) &&
-            (op.inputs[0].offset < inside_begin ||
-             op.inputs[0].offset >= inside_end))
-          record(from, op.inputs[0].offset, "branch");
+        // inside it are the control flow the listing already draws. Leaving
+        // means leaving the swept range *in the space it was swept in* -- the
+        // same offset in another space is a different place, and is worth
+        // indexing even when the offset happens to fall inside it.
+        if (op.inputs.empty() || is_constant(op.inputs[0]))
+          break; // p-code-relative: an intra-instruction branch, which cannot leave
+        const Addr to = destination(cfg, op.inputs[0]);
+        if (to.space == cfg.code_space && to.offset >= inside_begin &&
+            to.offset < inside_end)
+          break;
+        record(from, to, "branch");
         break;
+      }
 
       default:
         // A constant that is an address of anything is a reference: a string,
         // a table, a function pointer. Which of those it is, the caller
         // decides by looking at what lives there.
-        for (const VarnodeData &in : op.inputs)
-          if (is_constant(in) && in.offset != 0) record(from, in.offset, "data");
+        for (const Varnode &in : op.inputs)
+          if (is_constant(in) && in.offset != 0)
+            record(from, destination(cfg, in), "data");
         break;
       }
     }
@@ -78,8 +98,8 @@ void Xrefs::forget(uint64_t begin, uint64_t end) {
   }
 }
 
-std::vector<uint64_t> Xrefs::call_targets() const {
-  std::vector<uint64_t> targets;
+std::vector<Addr> Xrefs::call_targets() const {
+  std::vector<Addr> targets;
 
   // incoming_ is ordered, so this comes out sorted without sorting it.
   for (const auto &entry : incoming_) {
@@ -94,7 +114,7 @@ std::vector<uint64_t> Xrefs::call_targets() const {
   return targets;
 }
 
-const std::vector<Xref> &Xrefs::to(uint64_t address) const {
+const std::vector<Xref> &Xrefs::to(const Addr &address) const {
   static const std::vector<Xref> none;
   auto it = incoming_.find(address);
   return it == incoming_.end() ? none : it->second;

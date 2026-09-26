@@ -9,6 +9,8 @@
 // can stop that, so it is written down instead.
 #pragma once
 
+#include "../pcode.h"
+
 #include <string>
 #include <cstdint>
 
@@ -61,6 +63,15 @@ bool pcall(lua_State *L, int nargs, int nresults, std::string &error);
 
 inline void set_string(lua_State *L, const char *key, const std::string &value) {
   lua_pushlstring(L, value.data(), value.size());
+  lua_setfield(L, -2, key);
+}
+
+// A fraction rather than a count: a confidence, a rate, a score. Separate
+// because the integer version silently truncates one to nothing, and a
+// confidence of 0.69 reported as 0 reads as "no idea" rather than "fairly
+// sure".
+inline void set_double(lua_State *L, const char *key, double value) {
+  lua_pushnumber(L, value);
   lua_setfield(L, -2, key);
 }
 
@@ -151,6 +162,20 @@ void push_function(lua_State *L, SsaFunction *fn);
 void push_op(lua_State *L, SsaOp *op);
 void push_value(lua_State *L, SsaValue *value);
 void push_context(lua_State *L, PassContext *ctx);
+
+// ---- registers ----------------------------------------------------------
+//
+// The register-name argument several methods take ("RDI", "x0", "sp") resolved
+// to storage. Names arrive with whatever casing the person who wrote the
+// prototype used, and Ghidra spells x86 registers RAX and ARM ones x0 -- so
+// the name as written is tried, then upper, then lower. A zeroed Varnode when
+// the spec has no such register, which every caller here reads as "no such
+// register" and pushes nil for.
+Varnode lookup_register(PassContext &ctx, const std::string &name);
+
+// The name of a space, resolved through whichever function or context last
+// reached Lua (see lua_ssa.cpp). "" for a space no table knows about.
+std::string space_name(lua_State *L, SpaceId space);
 
 // ---- module openers -----------------------------------------------------
 //

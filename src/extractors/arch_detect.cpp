@@ -13,6 +13,7 @@
 // that it tries everything in the specs directory.
 #include "../extract.h"
 #include "../pcode.h"
+#include "../pcode_in.h"
 #include "../target.h"
 
 #include "error.hh"
@@ -49,12 +50,18 @@ Score score_spec(ghidra::Sleigh &translator, const Image &image, uint64_t addr,
   Score score;
   ghidra::AddrSpace *code = translator.getDefaultCodeSpace();
 
+  // The op stream itself is thrown away here -- only the terminator count
+  // matters -- but PcodeCapture still hands it to us in IR types, which is
+  // what lets is_terminator() be asked about it.
+  Spaces spaces;
+  SpaceCache space_cache;
+
   uint64_t cursor = addr;
   const uint64_t end = addr + length;
   int terminators = 0;
 
   for (int count = 0; count < kMaxInstructions && cursor < end; ++count) {
-    PcodeCapture capture;
+    PcodeCapture capture(space_cache, spaces);
     ghidra::int4 size = 0;
     try {
       size = translator.oneInstruction(capture, ghidra::Address(code, cursor));

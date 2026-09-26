@@ -17,12 +17,8 @@
 #include "../target.h"
 #include "lua_util.h"
 
-#include "opcodes.hh"
-#include "sleigh.hh"
-
 #include <cctype>
 #include <cstring>
-#include <ostream>
 #include <string>
 
 namespace ddd {
@@ -33,6 +29,31 @@ namespace {
 
 SsaFunction *to_function(lua_State *L, int index) {
   return static_cast<SsaFunction *>(check_object(L, index, kFunction));
+}
+
+// ---- naming storage -----------------------------------------------------
+//
+// A SsaValue carries a SpaceId, not a name -- names live in the Spaces table
+// the TargetSet owns, and nothing in the value points at it. Every value and
+// op reaches Lua through a function or a context, so whichever of those went
+// out last is the vocabulary the plugin is reading in; it is left in the
+// registry under this key. Null before either has been pushed, which is why
+// space_name() has an answer for that case rather than crashing.
+constexpr const char *kSpaces = "ddd.spaces";
+
+const Spaces *current_spaces(lua_State *L) {
+  if (lua_getfield(L, LUA_REGISTRYINDEX, kSpaces) != LUA_TLIGHTUSERDATA) {
+    lua_pop(L, 1);
+    return nullptr;
+  }
+  const Spaces *spaces = static_cast<const Spaces *>(lua_touserdata(L, -1));
+  lua_pop(L, 1);
+  return spaces;
+}
+
+void publish_spaces(lua_State *L, const Spaces *spaces) {
+  lua_pushlightuserdata(L, const_cast<Spaces *>(spaces));
+  lua_setfield(L, LUA_REGISTRYINDEX, kSpaces);
 }
 
 // The methods table sits in an upvalue of the __index closure; anything that
@@ -140,7 +161,7 @@ void push_operand(lua_State *L, const SsaOp &op, size_t index) {
   // A branch or call destination is an address in the code space, carried as
   // the operand's offset rather than as a constant -- which is exactly what a
   // pass looking for "what does this call" needs.
-  if (!in.is_tracked() && in.raw.space != nullptr && !in.is_constant())
+  if (!in.is_tracked() && in.raw.space != kNoSpace && !in.is_constant())
     set_number(L, "offset", static_cast<lua_Integer>(in.raw.offset));
 }
 
@@ -175,9 +196,7 @@ int value_properties(lua_State *L) {
   else if (key_is(L, "offset"))
     lua_pushinteger(L, static_cast<lua_Integer>(value->storage.offset));
   else if (key_is(L, "space"))
-    lua_pushstring(L, value->storage.space != nullptr
-                          ? value->storage.space->getName().c_str()
-                          : "");
+    lua_pushstring(L, space_name(L, value->storage.space).c_str());
   else if (key_is(L, "version"))
     lua_pushinteger(L, value->version);
   else if (key_is(L, "block"))
@@ -250,9 +269,9 @@ int op_properties(lua_State *L) {
   else if (key_is(L, "block"))
     lua_pushinteger(L, op->block);
   else if (key_is(L, "addr"))
-    lua_pushinteger(L, static_cast<lua_Integer>(op->addr.getOffset()));
+    lua_pushinteger(L, static_cast<lua_Integer>(op->addr));
   else if (key_is(L, "opcode"))
-    lua_pushstring(L, ghidra::get_opname(op->opc));
+    lua_pushstring(L, op_name(op->opc));
   else if (key_is(L, "is_phi"))
     lua_pushboolean(L, op->is_phi);
   else if (key_is(L, "nins"))
@@ -270,8 +289,7 @@ int op_properties(lua_State *L) {
     lua_createtable(L, 0, 3);
     set_number(L, "size", op->raw_output.size);
     set_number(L, "offset", static_cast<lua_Integer>(op->raw_output.offset));
-    if (op->raw_output.space != nullptr)
-      set_string(L, "space", op->raw_output.space->getName());
+    set_string(L, "space", space_name(L, op->raw_output.space));
   } else if (key_is(L, "ins")) {
     lua_createtable(L, static_cast<int>(op->ins.size()), 0);
     for (size_t i = 0; i < op->ins.size(); ++i) {
@@ -293,7 +311,7 @@ int function_op(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  push_op(L, &fn->op(static_cast<int>(id)));
+  push_op(L, &fn->op(OpId(static_cast<int>(id))));
   return 1;
 }
 
@@ -304,7 +322,7 @@ int function_value(lua_State *L) {
     lua_pushnil(L);
     return 1;
   }
-  push_value(L, &fn->value(static_cast<int>(id)));
+  push_value(L, &fn->value(ValueId(static_cast<int>(id))));
   return 1;
 }
 
@@ -320,7 +338,7 @@ int function_ops_iterator(lua_State *L) {
   int index = static_cast<int>(lua_tointeger(L, lua_upvalueindex(3)));
 
   while (block < fn->size()) {
-    const SsaBlock &current = (*fn)[block];
+    const SsaBlock &current = (*fn)[BlockId(block)];
     const int phis = static_cast<int>(current.phis.size());
     const int total = phis + static_cast<int>(current.ops.size());
 
@@ -355,7 +373,7 @@ int function_ops(lua_State *L) {
 int function_value_count(SsaFunction &fn) { return fn.value_count(); }
 
 void push_function_value(lua_State *L, SsaFunction &fn, int index) {
-  push_value(L, &fn.value(index));
+  push_value(L, &fn.value(ValueId(index)));
 }
 
 int function_values(lua_State *L) {
@@ -372,13 +390,14 @@ int function_values(lua_State *L) {
 // A block is a table: it is a list of ops and a couple of edge lists, and
 // there is nothing in it worth an identity.
 void push_block(lua_State *L, SsaFunction &fn, int id) {
-  const SsaBlock &block = fn[id];
-  const BasicBlock &raw = fn.cfg()[id];
+  const SsaBlock &block = fn[BlockId(id)];
+  const BasicBlock &raw = fn.cfg()[BlockId(id)];
 
   lua_createtable(L, 0, 7);
   set_number(L, "id", id);
-  set_number(L, "addr", static_cast<lua_Integer>(raw.start.getOffset()));
-  set_boolean(L, "entry", id == fn.cfg().entry);
+  set_number(L, "addr", static_cast<lua_Integer>(raw.start));
+  set_boolean(L, "entry", fn.cfg().entry.has_value() &&
+                              fn.cfg().entry->index == id);
 
   lua_createtable(L, static_cast<int>(raw.preds.size()), 0);
   for (size_t i = 0; i < raw.preds.size(); ++i) {
@@ -477,7 +496,11 @@ int function_properties(lua_State *L) {
   else if (key_is(L, "block_count"))
     lua_pushinteger(L, fn->size());
   else if (key_is(L, "entry"))
-    lua_pushinteger(L, fn->cfg().entry);
+    // nil for a function with no entry block -- an empty Cfg, or one built by
+    // hand. 0 would be an address inside the image header, not "none".
+    fn->cfg().entry.has_value()
+        ? static_cast<void>(lua_pushinteger(L, fn->cfg().entry->index))
+        : static_cast<void>(lua_pushnil(L));
   else if (key_is(L, "code_begin"))
     lua_pushinteger(L, static_cast<lua_Integer>(fn->cfg().code_begin));
   else if (key_is(L, "code_end"))
@@ -499,8 +522,8 @@ int context_comment(lua_State *L) {
 
 int context_comment_block(lua_State *L) {
   PassContext *ctx = check_context(L, 1);
-  ctx->annotations->comment_block(static_cast<int>(luaL_checkinteger(L, 2)),
-                                  check_string(L, 3));
+  ctx->annotations->comment_block(
+      BlockId(static_cast<int>(luaL_checkinteger(L, 2))), check_string(L, 3));
   return 0;
 }
 
@@ -594,35 +617,15 @@ int context_operand_name(lua_State *L) {
 // function only ever touched a sub-register of it.
 int context_register(lua_State *L) {
   PassContext *ctx = check_context(L, 1);
-  if (ctx->translator() == nullptr) {
-    lua_pushnil(L);
-    return 1;
-  }
 
-  // As written, then upper, then lower. Ghidra spells x86 registers RAX and
-  // ARM ones x0, and nobody writing a prototype should have to remember which
-  // -- `void *arg @ ax` means the same thing as `@ AX`.
-  std::string name = check_string(L, 2);
-  Storage storage = register_storage(*ctx->translator(), name);
-
-  if (storage.space == nullptr) {
-    std::string upper = name;
-    for (char &c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    storage = register_storage(*ctx->translator(), upper);
-  }
-  if (storage.space == nullptr) {
-    std::string lower = name;
-    for (char &c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    storage = register_storage(*ctx->translator(), lower);
-  }
-
-  if (storage.space == nullptr) {
+  const Varnode storage = lookup_register(*ctx, check_string(L, 2));
+  if (storage.space == kNoSpace) {
     lua_pushnil(L);
     return 1;
   }
 
   lua_createtable(L, 0, 3);
-  set_string(L, "space", storage.space->getName());
+  set_string(L, "space", space_name(L, storage.space));
   set_number(L, "offset", static_cast<lua_Integer>(storage.offset));
   set_number(L, "size", storage.size);
   return 1;
@@ -742,19 +745,23 @@ int context_user_type(lua_State *L) {
   return 1;
 }
 
-// What a pass says about its own work. Goes where the rest of the pipeline's
-// narration goes, which in a drawn interface is a captured string and not the
-// screen.
+// What a pass says about its own work. One line, through the same channel a
+// C++ pass reports on: a plugin narrating its own run must not be able to
+// splice text into the middle of the listing, which in a drawn interface is a
+// buffer being built, not a terminal.
+//
+// Whether it is shown at all is the caller's decision, not the plugin's.
 int context_log(lua_State *L) {
   PassContext *ctx = check_context(L, 1);
   const int count = lua_gettop(L);
+
+  std::string line;
   for (int i = 2; i <= count; ++i) {
-    if (i > 2)
-      ctx->stream() << " ";
-    ctx->stream() << luaL_tolstring(L, i, nullptr);
+    if (i > 2) line += " ";
+    line += luaL_tolstring(L, i, nullptr);
     lua_pop(L, 1);
   }
-  ctx->stream() << "\n";
+  ctx->say(std::move(line));
   return 0;
 }
 
@@ -785,9 +792,11 @@ const luaL_Reg kContextMethods[] = {
     {nullptr, nullptr}};
 
 unsigned pointer_width(const PassContext &ctx) {
-  if (ctx.target == nullptr || ctx.target->translator == nullptr)
-    return 8;
-  return ctx.target->translator->getDefaultCodeSpace()->getAddrSize();
+  const uint32_t size = ctx.target == nullptr ? 0 : ctx.target->pointer_size();
+  // 8 rather than 0: this is shown to a plugin as "how wide is a pointer
+  // here", and the answer for a context with no target is the width
+  // everything is assumed to be, not "unknown".
+  return size == 0 ? 8 : size;
 }
 
 int context_properties(lua_State *L) {
@@ -837,12 +846,18 @@ int context_properties(lua_State *L) {
       return 1;
     }
 
-    lua_createtable(L, 0, 7);
+    lua_createtable(L, 0, 10);
     set_string(L, "name", abi->name);
     set_string(L, "result", abi->result);
     set_string(L, "stack_pointer", abi->stack_pointer);
     set_string(L, "return_address_register", abi->return_address_register);
     set_boolean(L, "return_address_on_stack", abi->return_address_on_stack);
+
+    // Where the arguments are when they are not in registers, which on 32-bit
+    // x86 is always. Zero slot size means this convention passes none.
+    set_number(L, "stack_offset", static_cast<lua_Integer>(abi->stack_offset));
+    set_number(L, "stack_slot", static_cast<lua_Integer>(abi->stack_slot));
+    set_number(L, "stack_count", abi->stack_count);
 
     lua_createtable(L, static_cast<int>(abi->arguments.size()), 0);
     for (size_t i = 0; i < abi->arguments.size(); ++i) {
@@ -907,7 +922,35 @@ PassContext *check_context(lua_State *L, int index) {
   return static_cast<PassContext *>(check_object(L, index, kContext));
 }
 
+std::string space_name(lua_State *L, SpaceId space) {
+  const Spaces *spaces = current_spaces(L);
+  return spaces == nullptr ? std::string() : spaces->name(space);
+}
+
+Varnode lookup_register(PassContext &ctx, const std::string &name) {
+  ghidra::Sleigh *translator = ctx.translator();
+  Spaces *spaces = ctx.spaces();
+  if (translator == nullptr || spaces == nullptr)
+    return Varnode{};
+
+  std::string upper = name;
+  for (char &c : upper)
+    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  std::string lower = name;
+  for (char &c : lower)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+  for (const std::string &candidate : {name, upper, lower}) {
+    const Varnode found = register_storage(*translator, *spaces, candidate);
+    if (found.space != kNoSpace)
+      return found;
+  }
+  return Varnode{};
+}
+
 void push_function(lua_State *L, SsaFunction *fn) {
+  if (fn != nullptr)
+    publish_spaces(L, &fn->spaces());
   push_object(L, fn, kFunction);
 }
 
@@ -918,6 +961,8 @@ void push_value(lua_State *L, SsaValue *value) {
 }
 
 void push_context(lua_State *L, PassContext *ctx) {
+  if (ctx != nullptr)
+    publish_spaces(L, ctx->spaces());
   push_object(L, ctx, kContext);
 }
 
@@ -935,9 +980,9 @@ void open_ssa(lua_State *L) {
 
   // Every p-code opcode by name, so a plugin can write `ddd.opcodes.INT_XOR`
   // and find out at load time that it misspelled it rather than at match time.
-  lua_createtable(L, 0, ghidra::CPUI_MAX);
-  for (int opc = 1; opc < ghidra::CPUI_MAX - 1; ++opc) {
-    const char *name = ghidra::get_opname(static_cast<ghidra::OpCode>(opc));
+  lua_createtable(L, 0, static_cast<int>(Op::kCount));
+  for (int opc = 0; opc < static_cast<int>(Op::kCount); ++opc) {
+    const char *name = op_name(static_cast<Op>(opc));
     if (name == nullptr)
       continue;
     lua_pushinteger(L, opc);

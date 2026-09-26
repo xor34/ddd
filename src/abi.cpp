@@ -1,5 +1,7 @@
 #include "abi.h"
 
+#include "pcode_in.h"
+
 #include "error.hh"
 #include "sleigh.hh"
 
@@ -35,6 +37,9 @@ const std::vector<CallingConvention> &conventions() {
        true,
        {"RBX", "RBP", "R12", "R13", "R14", "R15"}},
 
+      // 32-bit x86 passes everything on the stack, in order, above the
+      // return address the call pushed. Nothing is in a register, which is
+      // why the stack fields below exist at all.
       {"cdecl-x86",
        "ESP",
        {},
@@ -43,7 +48,55 @@ const std::vector<CallingConvention> &conventions() {
        "",
        0,
        true,
-       {"EBX", "ESI", "EDI", "EBP"}},
+       {"EBX", "ESI", "EDI", "EBP"},
+       4,
+       4,
+       8},
+
+      // The same argument passing; the difference is who pops them, which is
+      // the callee's business and shows up as `ret 0x8` rather than `ret`.
+      {"stdcall-x86",
+       "ESP",
+       {},
+       "EAX",
+       "ESP",
+       "",
+       0,
+       true,
+       {"EBX", "ESI", "EDI", "EBP"},
+       4,
+       4,
+       8},
+
+      // Microsoft's fastcall: the first two in registers and the rest on the
+      // stack. Named rather than guessed -- it looks identical to cdecl until
+      // you notice ECX and EDX are read without being written.
+      {"fastcall-x86",
+       "ECX",
+       {"ECX", "EDX"},
+       "EAX",
+       "ESP",
+       "",
+       0,
+       true,
+       {"EBX", "ESI", "EDI", "EBP"},
+       4,
+       4,
+       8},
+
+      // A C++ member function: `this` in ECX, everything else on the stack.
+      {"thiscall-x86",
+       "ECX",
+       {"ECX"},
+       "EAX",
+       "ESP",
+       "",
+       0,
+       true,
+       {"EBX", "ESI", "EDI", "EBP"},
+       4,
+       4,
+       8},
 
       {"aapcs32",
        "r0",
@@ -87,26 +140,44 @@ const CallingConvention *find_convention(const std::string &name) {
   return it == table.end() ? nullptr : &*it;
 }
 
-Storage register_storage(ghidra::Sleigh &translator, const std::string &name) {
+const std::vector<std::string> &machine_flags() {
+  // x86 first: the interrupt flag is what `sti` and `cli` are for, and the
+  // direction flag is what `cld` and `std` are for -- both are machine state a
+  // reader of firmware is looking for and neither is read by the code that
+  // sets it. The rest are the flags an operating system writes deliberately.
+  //
+  // Then the Cortex-M interrupt masks, which `cpsid`/`cpsie` and `msr` write
+  // for exactly the same reason.
+  static const std::vector<std::string> names = {
+      "IF", "DF", "TF", "AC", "NT", "IOPL", "VM",
+      "PRIMASK", "FAULTMASK", "BASEPRI",
+  };
+  return names;
+}
+
+Varnode register_storage(ghidra::Sleigh &translator, Spaces &spaces,
+                         const std::string &name) {
   try {
-    const VarnodeData &vn = translator.getRegister(name);
-    return storage_of(vn);
+    const ghidra::VarnodeData &vn = translator.getRegister(name);
+    SpaceCache cache;
+    return to_varnode(vn, cache, spaces);
   } catch (ghidra::LowlevelError &) {
-    return Storage{};
+    return Varnode{};
   }
 }
 
-std::vector<Storage> observable_storage(const CallingConvention *abi,
-                                        ghidra::Sleigh *translator) {
-  std::vector<Storage> result;
+std::vector<Varnode> observable_storage(const CallingConvention *abi,
+                                        ghidra::Sleigh *translator,
+                                        Spaces &spaces) {
+  std::vector<Varnode> result;
   if (abi == nullptr || translator == nullptr)
     return result;
 
   auto add = [&](const std::string &name) {
     if (name.empty())
       return;
-    Storage storage = register_storage(*translator, name);
-    if (storage.space != nullptr)
+    Varnode storage = register_storage(*translator, spaces, name);
+    if (storage.space != kNoSpace)
       result.push_back(storage);
   };
 
@@ -127,12 +198,14 @@ std::vector<std::string> default_context(const std::string &spec_path) {
   return {};
 }
 
-const CallingConvention *guess_convention(ghidra::Sleigh &translator) {
+const CallingConvention *guess_convention(ghidra::Sleigh &translator,
+                                          Spaces &spaces) {
   for (const CallingConvention &convention : conventions()) {
-    if (register_storage(translator, convention.signature_register).space ==
-        nullptr)
+    if (register_storage(translator, spaces, convention.signature_register)
+            .space == kNoSpace)
       continue;
-    if (register_storage(translator, convention.stack_pointer).space == nullptr)
+    if (register_storage(translator, spaces, convention.stack_pointer).space ==
+        kNoSpace)
       continue;
     return &convention;
   }

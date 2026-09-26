@@ -1,14 +1,13 @@
 #include "reaching.h"
 
-#include "opcodes.hh"
-
 namespace ddd {
 
-std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx) {
-  std::set<int> roots;
+std::set<ValueId> observable_values(const SsaFunction &fn,
+                                    const PassContext &ctx) {
+  std::set<ValueId> roots;
 
-  const std::vector<Storage> storages =
-      observable_storage(ctx.abi(), ctx.translator());
+  const std::vector<Varnode> storages =
+      observable_storage(ctx.abi(), ctx.translator(), *ctx.spaces());
   if (storages.empty())
     return roots;
 
@@ -22,17 +21,17 @@ std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx) {
   // has no defining op, so naming it a root keeps nothing alive, and anything
   // the function actually wrote there was plausibly written for the call.
   if (ctx.abi() != nullptr && ctx.translator() != nullptr) {
-    std::vector<Storage> arguments;
+    std::vector<Varnode> arguments;
     for (const std::string &name : ctx.abi()->arguments) {
-      Storage storage = register_storage(*ctx.translator(), name);
-      if (storage.space != nullptr)
+      Varnode storage = register_storage(*ctx.translator(), *ctx.spaces(), name);
+      if (storage.space != kNoSpace)
         arguments.push_back(storage);
     }
 
     fn.for_each_op([&](const SsaOp &op) {
-      if (op.opc != ghidra::CPUI_CALL && op.opc != ghidra::CPUI_CALLIND)
+      if (op.opc != Op::CALL && op.opc != Op::CALLIND)
         return;
-      for (const Storage &storage : arguments) {
+      for (const Varnode &storage : arguments) {
         SsaValue *value = reaching.before(op, storage);
         if (value != nullptr)
           roots.insert(value->id);
@@ -50,7 +49,7 @@ std::set<int> observable_values(const SsaFunction &fn, const PassContext &ctx) {
     if (!fn.dominance().reachable(block.id))
       continue;
 
-    for (const Storage &storage : storages) {
+    for (const Varnode &storage : storages) {
       SsaValue *value = reaching.at_exit(block.id, storage);
       if (value != nullptr)
         roots.insert(value->id);
@@ -65,25 +64,25 @@ ReachingValues::ReachingValues(const SsaFunction &fn) : fn_(fn) {
 
   const Dominance &dom = fn.dominance();
   const Cfg &cfg = fn.cfg();
-  if (cfg.entry < 0)
+  if (!cfg.entry)
     return;
 
   // Live-ins are defined by no op, so seed them at the entry: storage the
   // function only reads still has a value reaching every point in it.
   for (int i = 0; i < fn.value_count(); ++i) {
-    const SsaValue &value = fn.value(i);
+    const SsaValue &value = fn.value(ValueId{i});
     if (value.is_live_in())
-      entry_[cfg.entry][value.storage] = const_cast<SsaValue *>(&value);
+      entry_[*cfg.entry][value.storage] = const_cast<SsaValue *>(&value);
   }
 
   // Preorder over the dominator tree. A block sees everything its dominator
   // defined, which is exactly the scoping build_ssa renamed under.
-  std::vector<int> stack{cfg.entry};
+  std::vector<BlockId> stack{*cfg.entry};
   while (!stack.empty()) {
-    int b = stack.back();
+    BlockId b = stack.back();
     stack.pop_back();
 
-    std::unordered_map<Storage, SsaValue *, StorageHash> state = entry_[b];
+    std::unordered_map<Varnode, SsaValue *, VarnodeHash> state = entry_[b];
     for (const SsaOp *phi : fn[b].phis)
       if (phi->out != nullptr)
         state[phi->out->storage] = phi->out;
@@ -91,14 +90,14 @@ ReachingValues::ReachingValues(const SsaFunction &fn) : fn_(fn) {
       if (op->out != nullptr)
         state[op->out->storage] = op->out;
 
-    for (int child : dom.children[b]) {
+    for (BlockId child : dom.children[b]) {
       entry_[child] = state;
       stack.push_back(child);
     }
   }
 }
 
-SsaValue *ReachingValues::at_exit(int block, const Storage &storage) const {
+SsaValue *ReachingValues::at_exit(BlockId block, const Varnode &storage) const {
   SsaValue *value = at_entry(block, storage);
 
   for (const SsaOp *phi : fn_[block].phis)
@@ -111,13 +110,13 @@ SsaValue *ReachingValues::at_exit(int block, const Storage &storage) const {
   return value;
 }
 
-SsaValue *ReachingValues::at_entry(int block, const Storage &storage) const {
+SsaValue *ReachingValues::at_entry(BlockId block, const Varnode &storage) const {
   auto it = entry_[block].find(storage);
   return it == entry_[block].end() ? nullptr : it->second;
 }
 
 SsaValue *ReachingValues::before(const SsaOp &op,
-                                 const Storage &storage) const {
+                                 const Varnode &storage) const {
   SsaValue *value = at_entry(op.block, storage);
 
   for (const SsaOp *phi : fn_[op.block].phis) {

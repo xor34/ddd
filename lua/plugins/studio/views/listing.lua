@@ -174,8 +174,32 @@ function M.build(ui, options)
   -- before it sees them. Everything else bubbles up to the window's keymap.
   local keys = Gtk.EventControllerKey()
   keys.propagation_phase = Gtk.PropagationPhase.CAPTURE
-  keys.on_key_pressed = function(_, keyval)
+  -- hjkl, because this is a listing you read with both hands on the keyboard.
+  --
+  -- j and k are lines; h, l, w and b are what is on one -- the next token, or
+  -- in a hexdump the next byte, which is how you get to one without aiming at
+  -- it with the pointer. They wrap the way vim's do: w off the end of a line
+  -- lands on the first thing on the next, b off the front lands on the *last*
+  -- thing on the one before, rather than on the beginning of it. Anything else
+  -- makes walking backwards through a function a sequence of two keystrokes
+  -- per line.
+  keys.on_key_pressed = function(_, keyval, _, state)
     local name = gtk.Gdk.keyval_name(keyval)
+
+    -- The commands, before the text view gets a look.
+    --
+    -- A GtkTextView has bindings of its own -- ctrl+a selects everything,
+    -- ctrl+c copies, the arrows and page keys move its insertion point -- and
+    -- it consumes them where they are handled. Plain letters reach the window
+    -- and its keymap, which is why every other shortcut worked and the ones
+    -- with control did not: ctrl+a selected the buffer instead of opening the
+    -- analysis options. Whatever the keymap has claimed is claimed here first.
+    for _, command in ipairs(ddd.ui.commands) do
+      if command.key and gtk.accelerator(command.key, name, state) then
+        self.ui:run(command.name)
+        return true
+      end
+    end
 
     if name == "j" or name == "Down" then
       self:move_cursor(1)
@@ -183,15 +207,32 @@ function M.build(ui, options)
     elseif name == "k" or name == "Up" then
       self:move_cursor(-1)
       return true
-    elseif name == "w" then
+    elseif name == "l" or name == "Right" or name == "w" then
       self:move_word(1)
       return true
-    elseif name == "b" then
+    elseif name == "h" or name == "Left" or name == "b" then
       self:move_word(-1)
       return true
+    elseif name == "d" and gtk.accelerator("<control>d", name, state) then
+      self:move_page(0.5)
+      return true
+    elseif name == "u" and gtk.accelerator("<control>u", name, state) then
+      self:move_page(-0.5)
+      return true
+    elseif name == "t" or name == "o" then
+      -- The two ways out of a condition, by name rather than by aiming at a
+      -- label: `t` is the branch taken, `o` the other one. This is the motion
+      -- reading a function is actually made of, and doing it with the pointer
+      -- -- or by reading a hex address off the line and going to it -- is the
+      -- slow half of following control flow.
+      self:follow_edge(name == "t" and "taken" or "other")
+      return true
     elseif name == "Return" or name == "KP_Enter" then
-      local line = self.cursor_line and self.lines[self.cursor_line]
-      self:follow(line and line.tokens and line.tokens[1], line)
+      -- What the cursor is on, which is what the highlight is showing and what
+      -- the status bar is describing. Following the first token of the line
+      -- instead meant enter did something other than what it looked like it
+      -- was about to do.
+      self:follow(self:cursor_token(), self.cursor_line and self.lines[self.cursor_line])
       return true
     end
 
@@ -483,8 +524,13 @@ function View:show(addr)
     local landed = line and self.lines[line] and self.lines[line].addr
 
     if landed and addr - landed <= kNearEnough then
+      -- The cursor goes too, exactly as it does after a re-render. Following a
+      -- call within one screenful and pressing escape used to scroll back and
+      -- leave the cursor in the callee -- so the highlight, the status bar and
+      -- everything a command acts on were describing somewhere the eye had
+      -- already left.
+      self:set_cursor(line, { no_scroll = true, at = addr })
       self:reveal(addr)
-      self:highlight(self.selected_id)
       self:flash(addr)
       return
     end
@@ -857,8 +903,10 @@ function View:paint_function(paint, listing, info)
     self.lines[paint.line] = { addr = block.addr }
     self:mark_line(block.addr, paint.line)
 
-    -- Where an arrow into this block has to land.
+    -- Where an arrow into this block has to land. Marked as a label as well,
+    -- because it is where one block stops being the block the cursor is in.
     line_of_block[block.id] = paint.line
+    self.lines[paint.line].label = true
     gutter()
 
     if block.entry then
@@ -931,6 +979,14 @@ function View:paint_function(paint, listing, info)
       end
 
       local record = { addr = line.addr, tokens = {} }
+
+      -- The two ways out of this line, as addresses, for `t` and `o`. Worked
+      -- out here because here is where the block ids and the addresses they
+      -- stand for are both in hand; a branch out of the function has only the
+      -- address, which is the one that matters.
+      record.taken = (line.taken and targets[line.taken]) or line.leaves
+      record.other = line.fallthrough and targets[line.fallthrough] or nil
+
       gutter()
       paint:put(("  %08x  "):format(line.addr), "address")
 
@@ -1015,13 +1071,15 @@ function View:paint_function(paint, listing, info)
 
   -- Now that every block has a line, the arrows can be drawn. A jump to a
   -- block that was not printed -- one nothing can reach, which the tokeniser
-  -- leaves out -- has nowhere to point and is dropped; an edge to the line
-  -- immediately below is what falling through already looks like, and an arrow
-  -- saying so is a lane spent on nothing.
+  -- leaves out -- has nowhere to point and is dropped.
+  --
+  -- Both edges of a condition get one, including the one that lands on the
+  -- very next line: which way is which is the thing being asked, and drawing
+  -- only the branch that jumps says nothing about where not taking it goes.
   local resolved = {}
   for _, jump in ipairs(jumps) do
     local to = line_of_block[jump.block]
-    if to and math.abs(to - jump.from) > 1 then
+    if to and to ~= jump.from then
       resolved[#resolved + 1] = { from = jump.from, to = to, kind = jump.kind }
     end
   end
@@ -1079,11 +1137,24 @@ function View:restage()
   if not span then return end
 
   local anchor = self:top_address() or self.ui.focus or self.ui.addr
+
+  -- Where the cursor was, kept across the re-render.
+  --
+  -- The anchor is the top of the screen, which is what the *view* has to come
+  -- back to so that bytes turning into code does not move the page under
+  -- someone's eyes. It is not where they were: putting the cursor there on
+  -- every report from the background analysis quietly drags "where you are"
+  -- to the top line every quarter of a second -- and that is what the history
+  -- then remembers you jumping from.
+  local cursor = self.cursor_line and self.lines[self.cursor_line]
+  local at = cursor and cursor.addr
+
   self:render(span.from, span.to, anchor)
 
   if anchor then
     self:reveal(anchor, 0.0)
-    self:set_cursor(self:line_for(anchor), { no_scroll = true, at = anchor })
+    local wanted = at and self:line_for(at) or self:line_for(anchor)
+    self:set_cursor(wanted, { no_scroll = true, at = at or anchor })
   end
   self:publish_viewport()
 end
@@ -1380,7 +1451,7 @@ function View:move_word(delta)
       return
     end
 
-    self:move_cursor(delta)
+    self:wrap(delta)
     return
   end
 
@@ -1405,8 +1476,44 @@ function View:move_word(delta)
   if chosen then
     self:select(chosen, record, { keep_cursor = true })
   else
-    self:move_cursor(delta)
+    self:wrap(delta)
   end
+end
+
+-- Off the end of a line, onto the line beyond it -- at the end a backwards
+-- move arrives from.
+--
+-- This is the half of vim's `w` and `b` that everything else gets wrong.
+-- Walking backwards through a function with `b` lands on the *last* thing on
+-- the line above, not on the first: the first is where you would be if you had
+-- pressed `k`, and having to press `b` again to undo a motion that went the
+-- wrong way is what makes a keyboard listing tiring to use.
+function View:wrap(delta)
+  local from = self.cursor_line
+  self:move_cursor(delta)
+
+  local line = self.cursor_line
+  if not line or line == from or delta > 0 then return end
+
+  local record = self.lines[line]
+  if not record then return end
+
+  -- A hexdump row ends at its last byte; a line of code at its last token.
+  if record.hex then
+    local last = (record.hex.count or 16) - 1
+    if last < 0 then return end
+    self:select(self:hex_token(record.hex,
+                               record.hex.first + last * 3
+                               + (last >= 8 and 1 or 0)),
+                record, { keep_cursor = true })
+    return
+  end
+
+  local chosen
+  for _, token in ipairs(record.tokens or {}) do
+    if not chosen or token.column > chosen.column then chosen = token end
+  end
+  if chosen then self:select(chosen, record, { keep_cursor = true }) end
 end
 
 -- The next line that is about something -- an address, a byte, a reference.
@@ -1517,6 +1624,132 @@ function View:highlight(id)
   end
 end
 
+-- What the cursor is on: the token `select` last settled on, found again by the
+-- column it was at. The record is rebuilt on every render, so the column is
+-- what survives; the first token of the line is the answer for a line nobody
+-- has moved along yet.
+function View:cursor_token()
+  local record = self.cursor_line and self.lines[self.cursor_line]
+  if not record then return nil end
+
+  if record.hex then return self:hex_token(record.hex, self.selected_column) end
+
+  local tokens = record.tokens or {}
+  for _, token in ipairs(tokens) do
+    if token.column == self.selected_column then return token end
+  end
+  return tokens[1]
+end
+
+-- Following one edge of the branch this block ends in.
+--
+-- `t` takes the branch, `o` takes the other way -- which is what a reader is
+-- deciding between at every condition, and doing it by finding the label on
+-- the line and aiming at it is the slow half of reading control flow.
+--
+-- The cursor does not have to be on the branch itself. A block ends in one, so
+-- the first branch at or below the cursor and inside this block is the one
+-- being asked about; the search stops at the next label, because that is
+-- somebody else's block.
+function View:follow_edge(which)
+  local line = self.cursor_line
+  if not line then return end
+
+  local limit = self.buffer:get_line_count()
+  local at = line
+
+  while at < limit do
+    local record = self.lines[at]
+    if record then
+      if at > line and record.label then break end
+
+      local target = which == "taken" and record.taken or record.other
+      if target then
+        self.ui:navigate(target)
+        return
+      end
+
+      -- A line that branches but not that way: `o` on an unconditional jump.
+      if record.taken or record.other then break end
+    end
+    at = at + 1
+  end
+
+  self.ui:status(which == "taken" and "nothing is taken from here"
+                                   or "nothing falls through from here")
+end
+
+-- Half a screen, and a whole one: ctrl+d, ctrl+u, ctrl+f.
+--
+-- The cursor and the page move together by the same amount, which is what
+-- makes these feel like vim's rather than like a scrollbar: what you were
+-- reading stays where it was on the screen, and the cursor is still on it.
+function View:visible_lines()
+  local ok, rect = pcall(self.view.get_visible_rect, self.view)
+  if not ok or not rect then return 20 end
+
+  local got, top = pcall(self.view.get_line_at_y, self.view, rect.y)
+  local also, bottom = pcall(self.view.get_line_at_y, self.view,
+                             rect.y + rect.height)
+  if not got or not also or type(top) ~= "userdata"
+     or type(bottom) ~= "userdata" then
+    return 20
+  end
+
+  return math.max(4, bottom:get_line() - top:get_line())
+end
+
+function View:move_page(fraction)
+  local step = math.floor(self:visible_lines() * fraction)
+  if step == 0 then step = fraction < 0 and -1 or 1 end
+
+  local line = self.cursor_line
+    or self:line_for(self.ui.focus or self.ui.addr) or 0
+  local limit = self.buffer:get_line_count()
+
+  -- Where it lands, then the nearest line that is about something -- in the
+  -- direction of travel first, so a half page down never ends up above where
+  -- it started.
+  local wanted = math.max(0, math.min(limit - 1, line + step))
+  local direction = step < 0 and -1 or 1
+
+  local found
+  local at = wanted
+  while at >= 0 and at < limit do
+    if self.lines[at] then
+      found = at
+      break
+    end
+    at = at + direction
+  end
+
+  if not found then
+    at = wanted
+    while at >= 0 and at < limit do
+      if self.lines[at] then
+        found = at
+        break
+      end
+      at = at - direction
+    end
+  end
+
+  if not found then return end
+
+  self:set_cursor(found, { no_scroll = true })
+
+  local adjustment = self.widget:get_vadjustment()
+  if adjustment then
+    local top = adjustment.value + adjustment.page_size * fraction
+    adjustment.value = math.max(adjustment.lower,
+                                math.min(adjustment.upper - adjustment.page_size,
+                                         top))
+  end
+
+  -- And only if the snapping left it off the page.
+  self:reveal_line(found)
+end
+
 function View:follow(token, line)
   -- The heading is the prototype; following it means editing it.
   if line and line.signature then
@@ -1578,6 +1811,26 @@ function View:probe(wanted)
   return ("hit test: %d/%d%s"):format(
     matched, checked,
     first_failure and ("  first miss: " .. first_failure) or "")
+end
+
+-- What `t` and `o` have to follow, over everything on screen.
+--
+-- The two edges of a condition are recorded while painting, from the block ids
+-- the pipeline produced -- so a listing that draws branches and has no edges on
+-- them is a listing where following one silently does nothing.
+function View:probe_edges()
+  local branches, taken, other = 0, 0, 0
+
+  for _, record in pairs(self.lines) do
+    if record.taken or record.other then
+      branches = branches + 1
+      if record.taken then taken = taken + 1 end
+      if record.other then other = other + 1 end
+    end
+  end
+
+  return ("edges: %d branch line(s), %d taken, %d other"):format(branches,
+                                                                 taken, other)
 end
 
 -- Navigating somewhere has to put the focus mark on that address's line, in

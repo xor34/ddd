@@ -20,13 +20,24 @@ public:
 
   void run(SsaFunction &fn, PassContext &ctx) override {
     Hil hil = build_hil(fn, ctx);
+    folded_ = hil.folded();
+    rewritten_ = hil.rewritten();
 
-    if (ctx.verbose)
-      ctx.stream() << "  folded " << hil.folded() << " value(s), rewrote "
-                   << hil.rewritten() << " idiom(s)\n";
-
+    // The listing is this pass's output, not a report about it: it goes to
+    // the stream whatever the caller asked for, and is the only thing here
+    // that does.
     ctx.stream() << to_string(hil, fn, ctx);
   }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    return {"folded " + std::to_string(folded_) + " value(s), rewrote " +
+            std::to_string(rewritten_) + " idiom(s)"};
+  }
+
+private:
+  int folded_ = 0;
+  int rewritten_ = 0;
 };
 
 DDD_REGISTER_PASS(HilPrint);
