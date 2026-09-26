@@ -60,6 +60,11 @@ struct Shape {
   // If: the else-arm, empty in the one-armed form.
   std::vector<Shape> otherwise;
 
+  // If: the condition is printed negated, because the arm that says something
+  // is the one the instruction did not take. The paths it is true of are the
+  // same either way -- only the braces are the other way round.
+  bool inverted = false;
+
   // Loop: where control goes when the loop is done -- what a `break` inside it
   // means. Absent for a loop that never lets go.
   std::optional<BlockId> follow;

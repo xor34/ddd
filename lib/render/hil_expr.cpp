@@ -134,6 +134,46 @@ void render(std::ostream &os, ExprRef expr, int parent_precedence) {
   if (parenthesise) os << ')';
 }
 
+// The opposite of an operator, where C has one to write. The orderings carry
+// the `u` or `s` that says which comparison the machine computed, and their
+// opposites carry it too -- `<s` is not the opposite of `>=u`.
+bool opposite_operator(const std::string &text, std::string &out) {
+  static const struct {
+    const char *op;
+    const char *opposite;
+  } kTable[] = {
+      {"==", "!="},   {"!=", "=="},   {"<", ">="},   {"<=", ">"},
+      {">", "<="},    {">=", "<"},    {"<u", ">=u"}, {"<=u", ">u"},
+      {">u", "<=u"},  {">=u", "<u"},  {"<s", ">=s"}, {"<=s", ">s"},
+      {">s", "<=s"},  {">=s", "<s"},
+  };
+
+  for (const auto &entry : kTable)
+    if (text == entry.op) {
+      out = entry.opposite;
+      return true;
+    }
+  return false;
+}
+
+void render_negated(std::ostream &os, ExprRef expr) {
+  if (expr != nullptr && expr->kind == ExprKind::Binary) {
+    std::string opposite;
+    if (opposite_operator(expr->text, opposite)) {
+      render(os, expr->operands[0], expr->precedence);
+      os << ' ' << opposite << ' ';
+      render(os, expr->operands[1], expr->precedence + 1);
+      return;
+    }
+  }
+
+  // Nothing to invert -- a name, a load, a sum. `!` is the word for it, and
+  // rendering at unary precedence is what puts the parentheses back around
+  // anything that would otherwise read as negating only its first term.
+  os << '!';
+  render(os, expr, kUnary);
+}
+
 void emit(std::vector<Token> &out, ExprRef expr, int parent_precedence) {
   if (expr == nullptr) {
     out.push_back({"op", "?", ""});

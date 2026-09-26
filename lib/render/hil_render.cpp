@@ -258,15 +258,15 @@ private:
     if (shape.otherwise.empty() && shape.body.size() == 1 &&
         shape.body.front().kind == ShapeKind::Jump &&
         !shape.body.front().conditional) {
-      out_ << indent(depth) << addr_field(shape.statement->addr) << "if (";
-      render(out_, shape.statement->value, kLowest);
-      out_ << ") " << jump_text(shape.body.front().block) << ";";
+      out_ << indent(depth) << addr_field(shape.statement->addr);
+      condition_head(*shape.statement, shape.inverted);
+      out_ << " " << jump_text(shape.body.front().block) << ";";
       notes(*shape.statement, depth);
       out_ << "\n";
       return;
     }
 
-    condition(*shape.statement, depth, " {");
+    condition(*shape.statement, depth, " {", shape.inverted);
     lines(shape.body, depth + 1);
     if (shape.otherwise.empty()) {
       out_ << code_column(depth) << "}\n";
@@ -332,15 +332,28 @@ private:
     out_ << "\n";
   }
 
+  // The `if (cond)` part, which an `if` line and an arm that is one jump both
+  // start with. `inverted` asks for the opposite of what the instruction
+  // computed: the arm being printed is the one it did *not* take, so the
+  // condition for reaching the arm is the opposite of the condition for taking
+  // the edge -- the same two paths, said the other way round.
+  void condition_head(const Statement &statement, bool inverted) {
+    out_ << "if (";
+    if (statement.value == nullptr)
+      out_ << "?";
+    else if (inverted)
+      render_negated(out_, statement.value);
+    else
+      render(out_, statement.value, kLowest);
+    out_ << ")";
+  }
+
   // The `if (cond)` a branch became.
   void condition(const Statement &statement, int depth,
-                 const std::string &suffix) {
-    out_ << indent(depth) << addr_field(statement.addr) << "if (";
-    if (statement.value != nullptr)
-      render(out_, statement.value, kLowest);
-    else
-      out_ << "?";
-    out_ << ")" << suffix;
+                 const std::string &suffix, bool inverted) {
+    out_ << indent(depth) << addr_field(statement.addr);
+    condition_head(statement, inverted);
+    out_ << suffix;
     notes(statement, depth);
     out_ << "\n";
   }

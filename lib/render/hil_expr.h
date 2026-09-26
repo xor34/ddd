@@ -77,6 +77,12 @@ std::string_view slot_name(ExprRef expr);
 // what keeps `a - (b - c)` from reading as `a - b - c`.
 void render(std::ostream &os, ExprRef expr, int parent_precedence);
 
+// The same, for the opposite of what the expression says. A comparison's
+// opposite is another comparison and C has a word for each, so `x != 0` is what
+// this writes and `!(x == 0)` is only the fallback for a condition that has no
+// opposite written as an operator.
+void render_negated(std::ostream &os, ExprRef expr);
+
 // Mirrors render(), emitting tokens instead of characters. A second walk rather
 // than a shared one because the string form is the hot path for batch output
 // and threading a sink through it earned nothing.

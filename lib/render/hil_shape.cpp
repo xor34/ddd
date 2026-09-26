@@ -415,6 +415,17 @@ private:
         node.conditional = true;
         node.body = region(*taken, join);
         node.otherwise = region(*fall, join);
+
+        // An arm that prints nothing is not an arm. `if (cond) { } else { x; }`
+        // is a hole with braces round it; `if (!cond) { x; }` is the statement.
+        // Only the braces are rearranged -- the condition is true of the same
+        // paths either way, so this invents nothing.
+        if (!says_anything(node.body, node.body.size()) &&
+            says_anything(node.otherwise, node.otherwise.size())) {
+          node.body = std::move(node.otherwise);
+          node.otherwise.clear();
+          node.inverted = true;
+        }
         out.push_back(std::move(node));
 
         cur = *join;
