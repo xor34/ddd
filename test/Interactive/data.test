@@ -52,8 +52,8 @@
 # RUN:   --region=0:0xc:ARM7_le --specs=%specs 2>/dev/null \
 # RUN:   | FileCheck --check-prefix=LOAD %s
 
-# LOAD: 0x0 {{.*}} = [0xc].4  ; 0xc -> 0x14 -> "literal pool target"
-# LOAD: 0x4 {{.*}} = [0x10].4  ; 0x10 -> 0xdeadbeef
+# LOAD: 0x0 {{.*}} = [0xc].4;  ; 0xc -> 0x14 -> "literal pool target"
+# LOAD: 0x4 {{.*}} = [0x10].4;  ; 0x10 -> 0xdeadbeef
 
 # The load is resolved even though the pool sits inside the code range: the
 # program reading the address as data is better evidence than any heuristic

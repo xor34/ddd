@@ -76,26 +76,25 @@ end
 -- and at anything that writes a slot twice; a caller that reuses one stack
 -- slot for two calls in a row reports the second, which is the one that is
 -- true at the call being annotated.
-local function slot_offset(label)
-  if not label then return nil end
+-- Where in the frame an address points, or nil when it does not point into the
+-- frame at all.
+--
+-- Either a slot -- which the frame analysis has an offset for, so nothing here
+-- has to read a name -- or the frame expression the address carries when it
+-- *is* the stack pointer, which is what the last push before a call looks
+-- like.
+--
+-- A preserved register's home is a slot too, and not one of these: `push rbx`
+-- saves a register for the callee, it does not pass an argument.
+local function slot_offset(ctx, address)
+  if not address then return nil end
 
-  -- Either the name of the slot -- `&var_18`, `&arg_8` -- or the frame
-  -- expression the address carries when it *is* the stack pointer, which is
-  -- what the last push before a call looks like: `sp`, `sp-0xc`.
-  local kind, digits = label:match("^&(%a+)_(%x+)$")
-  if digits then
-    if kind == "var" then return -tonumber(digits, 16) end
-    if kind == "arg" then return tonumber(digits, 16) end
-    return nil
+  local slot = ctx:slot(address)
+  if slot then
+    return slot.saved_register and nil or slot.offset
   end
 
-  if label == "sp" then return 0 end
-
-  local sign, amount = label:match("^sp([+-])0x(%x+)$")
-  if amount then
-    return sign == "-" and -tonumber(amount, 16) or tonumber(amount, 16)
-  end
-  return nil
+  return ctx:frame_pointer(address)
 end
 
 local function slot_name(offset)
@@ -126,7 +125,7 @@ local function find_pushes(fn, ctx, abi)
     for _, op in ipairs(block.ops) do
       if op.opcode == "STORE" and op.nins >= 3 then
         local address = op.ins[2] and op.ins[2].value
-        local offset = address and slot_offset(ctx:label(address))
+        local offset = slot_offset(ctx, address)
 
         if offset then
           pending[offset] = { offset = offset, operand = op.ins[3],

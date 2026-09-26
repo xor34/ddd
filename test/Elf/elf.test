@@ -46,8 +46,9 @@
 # CALL: ; function: compute
 # Matched as one line rather than split across two directives -- the word
 # "call" also appears in the block comment about the return address, and a
-# split match would land there first.
-# CALL: call ram:0x{{[0-9a-f]+}}:8  ; calls helper
+# split match would land there first. The address cannot be pinned the same
+# way: it is whatever this gcc put the call at.
+# CALL: v{{[0-9]+}} = call ram:0x{{[0-9a-f]+}}:8;  ; calls helper
 
 # The loop body reads as the source did: one accumulate, one increment. A
 # store through a named frame slot is written as the slot, so this is an
@@ -76,7 +77,14 @@
 # ENTRY: ; function: _start
 
 # The pointer handed to __libc_start_main is a function, not data.
-# ENTRY: = 0x{{[0-9a-f]+}}  ; &main
+# ENTRY: = 0x{{[0-9a-f]+}};  ; &main
+
+# _start ends in `hlt`, which lowers to a branch to itself and nothing else.
+# That is a loop whose body is the jump back, and it prints as one: the address
+# is the whole of what says an instruction is there, so it stays.
+# ENTRY: while (1) {
+# ENTRY: continue;
+# ENTRY: }
 
 
 # --whole_segment takes the segment instead, for a stripped binary or when the

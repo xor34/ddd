@@ -24,13 +24,13 @@ ddd.workflow "readability" {
         for value in fn:values() do
           local generated = ctx:display_name(value)
           if generated then
-            -- A stack slot is displayed as `var_c` but held internally as the
-            -- address `&var_c`, so look up what the user actually saw and
-            -- typed. The '&' is part of the shown name and only of the shown
-            -- name -- whether the value *is* an address is what address_kind()
-            -- records in C++, and a plugin here is working with what the
-            -- reader read.
-            local slot = #generated > 1 and generated:sub(1, 1) == "&"
+            -- A slot is displayed as `&var_c`, because that is the address it
+            -- is held as, but a person reading the listing names the variable
+            -- and types `var_c`. Ask the context which it is rather than
+            -- testing the first character: whether a value is an address is a
+            -- fact, and a name that starts with '&' for some other reason is
+            -- not one.
+            local slot = ctx:slot(value) ~= nil
             local shown = slot and generated:sub(2) or generated
 
             local chosen = ctx:user_name(func, shown)

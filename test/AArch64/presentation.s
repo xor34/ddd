@@ -16,17 +16,21 @@
   add  sp, sp, #0x20
   ret
 
-// A block is labelled by address as well as index, because an address is what
-// everything else in the world refers to it by.
-// CHECK: block 0 @ 0x1000 (entry):
+// The listing is the function's control flow, not its basic blocks. On a
+// straight-line region there is no shape to draw -- control falls from each
+// statement to the next -- so the block header is gone, the address column
+// stays because an address is what everything else in the world refers to the
+// code by, and the notes the passes left on the entry block open the listing.
+// CHECK-NOT: block 0 @ 0x1000
 // CHECK: ; frame: var_18[8]
+// CHECK: 0x1004    var_18 = arg0
 
 // A store through a frame slot is written as the slot itself.
-// CHECK: var_18 = arg0
+// CHECK: 0x1010    var_18 = var_18 + 0x1
 
-// Read back out of the slot, incremented, stored again.
-// CHECK: var_18 = var_18 + 0x1
-// CHECK: return
+// Read back out of the slot, incremented, stored again. Nothing follows a
+// `return`, so nothing follows it here either.
+// CHECK: 0x1018    return
 
 // None of the following appear anywhere in that listing.
 //

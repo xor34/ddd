@@ -1,0 +1,458 @@
+// stack-vars -- find stack slots and give them names.
+//
+// Two steps, both on the sparse engine:
+//   1. propagate "this value is entry_sp + k" along def-use edges
+//   2. every LOAD/STORE whose address is entry_sp + k is a stack slot
+//
+// Slots below the entry stack pointer are locals (var_10), slots at or above
+// it were put there by the caller (arg_8). That is the usual convention for a
+// downward-growing stack, which is every architecture this ships a calling
+// convention for.
+//
+// A slot's offset says where it is, which is not always what it is. Two kinds
+// are named by something better than their address: the return address a call
+// pushed, which the convention places, and the home of a parameter, which the
+// convention passed in a register. Both are recognised by what was stored
+// there -- a live-in value, so nothing in the function computed it.
+#include "passes/pass.h"
+#include "facts/frame_pointer.h"
+#include "facts/slot.h"
+#include "ir/sparse.h"
+
+#include <map>
+#include <ostream>
+#include <set>
+#include <sstream>
+
+namespace ddd {
+namespace {
+
+// Const-propagation with one extra point in the lattice: a value can be a
+// known offset from the stack pointer on entry.
+struct StackValue {
+  enum State { Top, Number, Frame, Bottom } state = Top;
+  int64_t value = 0; // the number, or the offset from entry_sp
+
+  static StackValue number(int64_t v) { return {Number, v}; }
+  static StackValue frame(int64_t offset) { return {Frame, offset}; }
+  static StackValue bottom() { return {Bottom, 0}; }
+
+  bool operator==(const StackValue &o) const {
+    return state == o.state &&
+           (state == Top || state == Bottom || value == o.value);
+  }
+};
+
+StackValue meet(const StackValue &a, const StackValue &b) {
+  if (a.state == StackValue::Top)
+    return b;
+  if (b.state == StackValue::Top)
+    return a;
+  if (a.state != b.state || a.value != b.value)
+    return StackValue::bottom();
+  return a;
+}
+
+StackValue evaluate(const SsaOp &op, const StackValue &a, const StackValue &b) {
+  const bool a_frame = a.state == StackValue::Frame;
+  const bool b_frame = b.state == StackValue::Frame;
+  const bool a_num = a.state == StackValue::Number;
+  const bool b_num = b.state == StackValue::Number;
+
+  switch (op.opc) {
+  case Op::COPY:
+  case Op::INT_ZEXT:
+  case Op::INT_SEXT:
+    return a;
+
+  case Op::INT_ADD: {
+    if (a_frame && b_num) {
+      return StackValue::frame(a.value + b.value);
+    }
+
+    if (a_num && b_frame) {
+      return StackValue::frame(a.value + b.value);
+    }
+
+    if (a_num && b_num) {
+      return StackValue::number(a.value + b.value);
+    }
+
+    return StackValue::bottom();
+  }
+
+  case Op::INT_SUB: {
+    if (a_frame && b_num) {
+      return StackValue::frame(a.value - b.value);
+    }
+
+    if (a_num && b_num) {
+      return StackValue::number(a.value - b.value);
+    }
+
+    return StackValue::bottom();
+  }
+
+  default:
+    return StackValue::bottom();
+  }
+}
+
+SparseAnalysis<StackValue> build_analysis(const Varnode &stack_pointer) {
+  SparseAnalysis<StackValue> analysis;
+
+  analysis.init = [] { return StackValue{}; };
+
+  analysis.raw = [](const Varnode &vn) {
+    if (!is_constant(vn))
+      return StackValue::bottom();
+    // Stack offsets arrive as unsigned constants that are really negative in
+    // the pointer's width, so sign-extend before doing arithmetic with them.
+    const int64_t value = static_cast<int64_t>(
+        sign_extend(vn.offset, static_cast<uint32_t>(vn.size)));
+    return StackValue::number(value);
+  };
+
+  // The stack pointer on entry is the origin of the frame; every other
+  // pre-existing value is unknown.
+  analysis.live_in = [stack_pointer](const SsaValue &value) {
+    return value.storage == stack_pointer ? StackValue::frame(0)
+                                          : StackValue::bottom();
+  };
+
+  analysis.merge = meet;
+
+  analysis.transform = [](const SsaOp &op, const ValueMap<StackValue> &values) {
+    StackValue a = op.ins.size() > 0 ? values(op.ins[0]) : StackValue::bottom();
+    StackValue b = op.ins.size() > 1 ? values(op.ins[1]) : StackValue::bottom();
+    if (a.state == StackValue::Top ||
+        (op.ins.size() > 1 && b.state == StackValue::Top))
+      return StackValue{};
+    return evaluate(op, a, b);
+  };
+
+  return analysis;
+}
+
+// Below the entry stack pointer is the function's own frame; at or above it
+// is whatever the caller left there. On a push-style architecture one of
+// those slots is not an argument at all -- it is the return address the call
+// instruction pushed, and the convention is the only thing that knows.
+std::string slot_name(int64_t offset, const CallingConvention *abi,
+                      const std::map<int64_t, std::string> &parameters) {
+  if (abi != nullptr && abi->return_address_on_stack &&
+      offset == abi->return_address_offset)
+    return "retaddr";
+
+  // A slot that holds a parameter is the parameter, and saying `arg0` where
+  // the caller passed one is saying where the value came from. This outranks
+  // the offset, which is only a location.
+  const auto parameter = parameters.find(offset);
+  if (parameter != parameters.end())
+    return parameter->second;
+
+  std::ostringstream os;
+  if (offset < 0) {
+    os << "var_" << std::hex << -offset;
+  } else {
+    os << "arg_" << std::hex << offset;
+  }
+  return os.str();
+}
+
+std::string frame_expression(int64_t offset) {
+  if (offset == 0)
+    return "sp";
+
+  std::ostringstream os;
+  os << "sp" << (offset < 0 ? "-" : "+") << "0x" << std::hex
+     << (offset < 0 ? -offset : offset);
+  return os.str();
+}
+
+class StackVars final : public Pass {
+public:
+  std::string name() const override { return "stack-vars"; }
+  std::string description() const override {
+    return "name stack slots from stack-pointer-relative accesses";
+  }
+
+  void run(SsaFunction &fn, PassContext &ctx) override {
+    if (ctx.stack_pointer().space == kNoSpace) {
+      slots_ = -1; // tells report() there was nothing to look at
+      return;
+    }
+
+    const Varnode stack_pointer = ctx.stack_pointer();
+    SparseResult<StackValue> result = solve(fn, build_analysis(stack_pointer));
+
+    // offset -> widest access seen there
+    std::map<int64_t, unsigned> slots;
+
+    // A slot holding a register the function must give back untouched. The
+    // prologue stores the incoming value there and the epilogue loads it back;
+    // neither is anything the program asked for.
+    std::map<int64_t, std::string> saved;
+    find_saved_registers(fn, ctx, result, saved);
+
+    // A slot holding the incoming value of an argument register. This is the
+    // same recognition as `saved` above and the opposite conclusion: what the
+    // callee is *given* is a variable of the program, so the slot is named
+    // after it rather than hidden.
+    std::map<int64_t, std::string> parameters;
+    std::set<OpId> spills;
+    find_parameters(fn, ctx, result, parameters, spills);
+
+    fn.for_each_op([&](SsaOp &op) {
+      // LOAD: out = *ins[1]. STORE: *ins[1] = ins[2]. ins[0] is the space id.
+      const bool load = op.opc == Op::LOAD;
+      const bool store = op.opc == Op::STORE;
+      if (!load && !store) {
+        label_frame_pointer(ctx, op, result);
+        return;
+      }
+      if (op.ins.size() < 2 || !op.ins[1].is_tracked())
+        return;
+
+      const StackValue &address = result[*op.ins[1].value];
+      if (address.state != StackValue::Frame)
+        return;
+
+      // Saving and restoring a callee-saved register is frame bookkeeping.
+      // The slot is not a variable of the program and the accesses are not
+      // statements of it.
+      auto saved_slot = saved.find(address.value);
+      if (saved_slot != saved.end()) {
+        ctx.knowledge->mark_plumbing(op);
+        ctx.knowledge->set<Slot>(op.ins[1].value->id,
+                                 Slot{address.value, true, saved_slot->second});
+        ctx.knowledge->set_label(*op.ins[1].value, "&saved_" + saved_slot->second);
+        return;
+      }
+
+      // Putting a parameter in its home. The slot is the parameter -- the
+      // frame comment says so by name -- and the value arriving is what the
+      // name means, so the store is not a statement of the program: a listing
+      // that shows it reads `arg0 = arg0`, which is the same fact twice. The
+      // accesses that *read* the slot still show, as the slot.
+      if (spills.count(op.id) != 0) ctx.knowledge->mark_plumbing(op);
+
+      unsigned width = load ? (op.out != nullptr ? op.out->storage.size : 0)
+                            : (op.ins.size() > 2 ? op.ins[2].raw.size : 0);
+      unsigned &recorded = slots[address.value];
+      recorded = std::max(recorded, width);
+
+      const std::string name = slot_name(address.value, ctx.abi(), parameters);
+      // A slot only where the address is a computed pointer. At offset 0 the
+      // address *is* the stack pointer, and calling that "&arg_0" would throw
+      // away the more useful name it already has -- for the listing and for
+      // every analysis that asks where a value lives.
+      if (op.ins[1].value->storage != stack_pointer) {
+        ctx.knowledge->set<Slot>(op.ins[1].value->id, Slot{address.value, false, name});
+        ctx.knowledge->set_label(*op.ins[1].value, "&" + name);
+      }
+      ctx.knowledge->comment(op, (load ? "load " : "store ") + name + " [" +
+                                       frame_expression(address.value) + "]");
+    });
+
+    annotate(fn, ctx, slots, saved, parameters);
+    slots_ = static_cast<int>(slots.size());
+  }
+
+  std::vector<std::string> report(const SsaFunction &,
+                                  const PassContext &) const override {
+    if (slots_ < 0) return {"no stack pointer known, skipping"};
+    if (slots_ == 0) return {"no stack slots found"};
+    return {std::to_string(slots_) + " stack slot(s)"};
+  }
+
+private:
+  // A value that is a pure frame offset but never dereferenced is still worth
+  // naming -- that is what a frame pointer looks like.
+  //
+  // Not a slot. A slot is a variable of the program; this is the machine's own
+  // register part-way through an update, and `sp-0x14` is what a reader wants
+  // to see rather than a name for memory nobody has read yet.
+  static void label_frame_pointer(PassContext &ctx, SsaOp &op,
+                                  const SparseResult<StackValue> &result) {
+    if (op.out == nullptr || ctx.knowledge->has_label(*op.out))
+      return;
+
+    const StackValue &value = result[*op.out];
+    if (value.state != StackValue::Frame)
+      return;
+    ctx.knowledge->set<FramePointer>(op.out->id, FramePointer{value.value});
+    ctx.knowledge->set_label(*op.out, frame_expression(value.value));
+  }
+
+  // A store of a register's *incoming* value into a frame slot is a
+  // callee-save spill: the value existed before the function did, so nothing
+  // here computed it, and the only reason to write it down is to put it back.
+  static void find_saved_registers(SsaFunction &fn, PassContext &ctx,
+                                   const SparseResult<StackValue> &result,
+                                   std::map<int64_t, std::string> &saved) {
+    // Only registers the convention says must be given back. Spilling an
+    // *argument* register also stores a live-in value to a frame slot, but
+    // that slot holds a parameter -- a real variable of the program -- and
+    // hiding it would lose argc and argv.
+    std::set<Varnode> preserved;
+    if (ctx.abi() != nullptr && ctx.translator() != nullptr) {
+      for (const std::string &name : ctx.abi()->preserved) {
+        Varnode storage = register_storage(*ctx.translator(), *ctx.spaces(), name);
+        if (storage.space != kNoSpace) preserved.insert(storage);
+      }
+    }
+    if (preserved.empty()) return;
+
+    fn.for_each_op([&](SsaOp &op) {
+      if (op.opc != Op::STORE || op.ins.size() < 3) return;
+      if (!op.ins[1].is_tracked() || !op.ins[2].is_tracked()) return;
+
+      const StackValue &address = result[*op.ins[1].value];
+      if (address.state != StackValue::Frame) return;
+
+      // A push routes the register through a temporary, so follow the copies
+      // to whatever originally produced the value.
+      const SsaValue *stored = original(op.ins[2].value);
+      if (stored == nullptr || !stored->is_live_in()) return;
+      if (preserved.count(stored->storage) == 0) return;
+
+      saved[address.value] = ctx.base_name_of(*stored);
+    });
+  }
+
+  // A slot that holds a parameter, named after the parameter.
+  //
+  //     mov [rbp-0x1c], edi
+  //
+  // is not the program storing anything: it is the convention putting the
+  // first argument where the function will keep it. Nothing else in the
+  // listing knows that, so the slot reads `var_1c` and every use of the first
+  // parameter reads `var_1c`, which is a name that says only where the
+  // variable lives.
+  //
+  // Three things have to hold at once, and each rules out a name that would
+  // be a lie. That the stored value is a live-in -- one that existed before
+  // the function did -- is what makes the slot a parameter rather than a
+  // local. That the store is in the entry block is what makes it the
+  // parameter's *home*: a store of the same live-in further down is a copy of
+  // the parameter into something else, which is a statement of the program
+  // (`var_14 = arg0`) and is left to say so. And that the slot is written
+  // once is what stops the name outliving the value it names -- a slot the
+  // function writes again holds the parameter only until it does not.
+  static void find_parameters(SsaFunction &fn, PassContext &ctx,
+                              const SparseResult<StackValue> &result,
+                              std::map<int64_t, std::string> &parameters,
+                              std::set<OpId> &spills) {
+    if (ctx.abi() == nullptr || ctx.translator() == nullptr) return;
+    if (!fn.cfg().entry) return;
+
+    // Where each argument register lives, keyed by address rather than by the
+    // storage itself: the convention names the whole register -- RDI, eight
+    // bytes -- and the function reads the low half of it, because a 32-bit
+    // parameter is four bytes and arrives in EDI. Both are the same incoming
+    // argument, and matching them is the same rule `signatures.lua` applies
+    // when it looks up a prototype's parameter.
+    std::map<Addr, int> arriving;
+    const std::vector<std::string> &arguments = ctx.abi()->arguments;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+      const Varnode storage =
+          register_storage(*ctx.translator(), *ctx.spaces(), arguments[i]);
+      if (storage.space != kNoSpace) arriving[address_of(storage)] = static_cast<int>(i);
+    }
+    if (arriving.empty()) return;
+
+    // How many times the function writes each slot, so that a slot written
+    // more than once is left out below. Counting all of them rather than only
+    // the stores of a live-in is the point: a slot that starts as a parameter
+    // and is later assigned to is a local whose first value came from the
+    // caller.
+    std::map<int64_t, int> writes;
+    fn.for_each_op([&](const SsaOp &op) {
+      if (op.opc != Op::STORE || op.ins.size() < 2) return;
+      if (!op.ins[1].is_tracked()) return;
+      const StackValue &address = result[*op.ins[1].value];
+      if (address.state == StackValue::Frame) ++writes[address.value];
+    });
+
+    const BlockId entry = *fn.cfg().entry;
+    for (const SsaOp *op : fn[entry].ops) {
+      if (op->opc != Op::STORE || op->ins.size() < 3) continue;
+      if (!op->ins[1].is_tracked() || !op->ins[2].is_tracked()) continue;
+
+      const StackValue &address = result[*op->ins[1].value];
+      if (address.state != StackValue::Frame) continue;
+      if (writes[address.value] != 1) continue;
+
+      const SsaValue *stored = original(op->ins[2].value);
+      if (stored == nullptr || !stored->is_live_in()) continue;
+
+      const auto arrived = arriving.find(address_of(stored->storage));
+      if (arrived == arriving.end()) continue;
+
+      // The convention's name for the parameter, unless something better
+      // already knows. A prototype the person wrote is applied by
+      // `signatures`, which runs before this pass for exactly this reason: it
+      // names the value that arrived, so the slot it lands in reads under the
+      // name the person used for it rather than under `arg<N>`.
+      const std::string &named = ctx.knowledge->label(*stored);
+      parameters[address.value] = named.empty()
+                                      ? "arg" + std::to_string(arrived->second)
+                                      : named;
+      spills.insert(op->id);
+    }
+  }
+
+  // Through COPY chains to the value that was really stored. `push rbx`
+  // lowers to `t = RBX; [rsp] = t`, so the operand of the store is a
+  // temporary and the live-in is one step behind it.
+  static const SsaValue *original(const SsaValue *value) {
+    for (int guard = 0; guard < 64 && value != nullptr; ++guard) {
+      const SsaOp *def = value->def;
+      if (def == nullptr || def->opc != Op::COPY || def->ins.size() != 1)
+        return value;
+      if (!def->ins[0].is_tracked()) return value;
+      value = def->ins[0].value;
+    }
+    return value;
+  }
+
+  // Writes the frame layout into the entry block's comments. That is output
+  // the listing shows, not a report about the pass -- a reader looking at the
+  // function wants to know where its variables live, whether or not they asked
+  // this pass to describe itself.
+  void annotate(const SsaFunction &fn, PassContext &ctx,
+                const std::map<int64_t, unsigned> &slots,
+                const std::map<int64_t, std::string> &saved,
+                const std::map<int64_t, std::string> &parameters) {
+    if (!fn.cfg().entry)
+      return;
+
+    if (!saved.empty()) {
+      std::ostringstream registers;
+      registers << "saves:";
+      for (const auto &entry : saved) registers << " " << entry.second;
+      ctx.knowledge->comment_block(*fn.cfg().entry, registers.str());
+    }
+
+    if (slots.empty()) return;
+
+    std::ostringstream layout;
+    layout << "frame:";
+    for (const auto &slot : slots) {
+      layout << " " << slot_name(slot.first, ctx.abi(), parameters) << "["
+             << slot.second << "]";
+    }
+    ctx.knowledge->comment_block(*fn.cfg().entry, layout.str());
+  }
+
+  // How many slots were found, or -1 when there was no stack pointer to look
+  // for them relative to. A count is all report() needs, so the layout above
+  // is not kept alive to describe it.
+  int slots_ = 0;
+};
+
+DDD_REGISTER_PASS(StackVars);
+
+} // namespace
+} // namespace ddd

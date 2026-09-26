@@ -30,7 +30,12 @@ ddd.workflow "readability" {
             local target = op:input(1)
             local called = target.offset and ctx:symbol(target.offset)
             if called then
-              ctx:comment(op, "calls " .. called)
+              -- Not `points_at`, though the destination is one of the call's
+              -- constants: what is recorded is where the control flow goes,
+              -- which is a fact about the op rather than about any value it
+              -- produces. Recording it as a points-at would type the call's
+              -- result -- a return value -- as a pointer to the function.
+              ctx:callee(op, called)
               named = named + 1
             end
           else
@@ -41,11 +46,14 @@ ddd.workflow "readability" {
               if operand.is_constant and not operand.is_space then
                 local pointed = ctx:symbol(operand.constant)
                 if pointed then
-                  -- The comment keeps the `&` to say this is the function's
-                  -- address; the *label* must not, because a leading `&` is
-                  -- how stack-vars marks a frame-slot address and the listing
-                  -- hides those definitions.
-                  ctx:comment(op, "&" .. pointed)
+                  -- The fact says this operand is a function's address and
+                  -- which function; the listing writes `&f` for it. The
+                  -- *label* is the bare name, because the `&` is how the
+                  -- address is spelled and a leading `&` on a label is what
+                  -- marks a frame slot.
+                  ctx:points_at(op, { kind = "code",
+                                      address = operand.constant,
+                                      text = pointed })
                   if op.out then ctx:label(op.out, pointed) end
                   named = named + 1
                 end

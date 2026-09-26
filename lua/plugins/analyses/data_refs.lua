@@ -6,14 +6,6 @@
 -- of leaving a bare number.
 local ddd = require "ddd"
 
-local escapes = { ["\n"] = "\\n", ["\t"] = "\\t", ['"'] = '\\"', ["\\"] = "\\\\" }
-
-local function escape(text)
-  return (text:gsub('[\n\t"\\]', escapes))
-end
-
-local function hex(value) return ("0x%x"):format(value) end
-
 -- A constant is only worth resolving if it points somewhere that is data.
 --
 -- Reading a word always "succeeds" anywhere inside the image, so that on its
@@ -25,6 +17,10 @@ local function hex(value) return ("0x%x"):format(value) end
 --   * anything else has to point past the end of everything disassembled.
 --     Small integers alias with the low addresses; the trailing data area does
 --     not.
+--
+-- What comes back is the fact, not a sentence about it: what is at the end of
+-- the reference, and -- for a literal pool entry -- the word on the way. How
+-- that reads in a listing is the listing's business.
 local function describe(ctx, address, width, loaded)
   if loaded then
     if not ctx:contains(address) then return nil end
@@ -36,25 +32,27 @@ local function describe(ctx, address, width, loaded)
 
   local text = ctx:read_string(address)
   if text then
-    return ('%s -> "%s"'):format(hex(address), escape(text))
+    return { kind = "string", address = address, text = text }
   end
 
   if not loaded and address < ctx.code_end then return nil end
 
   local word = ctx:read_int(address, width)
-  if not word then return ("%s -> data"):format(hex(address)) end
-
-  local described = ("%s -> %s"):format(hex(address), hex(word))
+  if not word then return { kind = "data", address = address } end
 
   -- One more hop, and no further: a literal pool entry is a pointer, and the
   -- thing worth reading is what it points at, not the pointer.
+  local found = { address = address, word = word }
   local pointed = ctx:read_string(word)
   if pointed then
-    return described .. (' -> "%s"'):format(escape(pointed))
+    found.kind = "string"
+    found.text = pointed
   elseif word ~= 0 and ctx:is_code(word) then
-    return described .. " (code)"
+    found.kind = "code"
+  else
+    found.kind = "data"
   end
-  return described
+  return found
 end
 
 -- Branch and call destinations are code; they are already shown as block edges
@@ -91,9 +89,9 @@ ddd.workflow "readability" {
               end
             end
 
-            local described = describe(ctx, operand.constant, width, loaded)
-            if described then
-              ctx:comment(op, described)
+            local found = describe(ctx, operand.constant, width, loaded)
+            if found then
+              ctx:points_at(op, found)
               ctx.resolved = ctx.resolved + 1
             end
           end
