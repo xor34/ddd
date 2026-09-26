@@ -8,8 +8,8 @@
 // Limitation: a phi in a loop that only feeds itself keeps a use of its own
 // result and survives. Catching those needs an SCC-based sweep, or real
 // liveness-based (pruned) placement in build_ssa.
-#include "../pass.h"
-#include "../reaching.h"
+#include "passes/pass.h"
+#include "ir/reaching.h"
 
 #include <set>
 #include <string>
@@ -30,7 +30,7 @@ public:
     // function and is exactly what the function computes. `dce` learned this
     // the same way; without it, deleting the phi makes everything feeding it
     // dead too, and the function empties out.
-    const std::set<ValueId> roots = observable_values(fn, ctx);
+    const std::set<ValueId> roots = observable_values(fn, ctx.target);
 
     removed_ = remove_ops_to_fixpoint(
         fn,

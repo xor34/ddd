@@ -8,14 +8,14 @@
 //
 // Indices are one-based here, because that is what Lua counts from:
 // `op:input(1)` is `op.ins[0]`.
-#include "../abi.h"
-#include "../annotations.h"
-#include "../image.h"
-#include "../pass.h"
-#include "../project.h"
-#include "../ssa.h"
-#include "../target.h"
-#include "lua_util.h"
+#include "decode/abi.h"
+#include "ir/annotations.h"
+#include "image/image.h"
+#include "passes/pass.h"
+#include "app/project.h"
+#include "ir/ssa.h"
+#include "decode/target.h"
+#include "lua/lua_util.h"
 
 #include <cctype>
 #include <cstring>

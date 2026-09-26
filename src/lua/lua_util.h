@@ -9,7 +9,7 @@
 // can stop that, so it is written down instead.
 #pragma once
 
-#include "../pcode.h"
+#include "pcode/pcode.h"
 
 #include <string>
 #include <cstdint>

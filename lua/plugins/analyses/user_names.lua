@@ -26,7 +26,10 @@ ddd.workflow "readability" {
           if generated then
             -- A stack slot is displayed as `var_c` but held internally as the
             -- address `&var_c`, so look up what the user actually saw and
-            -- typed.
+            -- typed. The '&' is part of the shown name and only of the shown
+            -- name -- whether the value *is* an address is what address_kind()
+            -- records in C++, and a plugin here is working with what the
+            -- reader read.
             local slot = #generated > 1 and generated:sub(1, 1) == "&"
             local shown = slot and generated:sub(2) or generated
 

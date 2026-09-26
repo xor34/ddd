@@ -70,3 +70,32 @@
 
 # EXPLICIT: == stack-vars ==
 # EXPLICIT: == print-ssa ==
+
+
+# A pipeline is a claim about how to read a binary, and a name in it that
+# nothing answers to is a mistake rather than a preference -- so both callers
+# refuse it, and say what there is instead. Silent degradation to the folded
+# listing would show a view nobody asked for and give no sign the pipeline was
+# not the one written down.
+#
+# RUN: not %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --passes=hil,nosuch --function=main 2>&1 \
+# RUN:   | FileCheck --check-prefix=NOPASS %s
+
+# NOPASS: unknown pass: nosuch
+# NOPASS: passes:
+
+# The session path -- what an interface and a script both go through -- used to
+# answer with the folded listing instead of an error.
+#
+# RUN: printf 'local f = ddd.session.functions()\n' > %t/bad.lua
+# RUN: printf 'local l = ddd.session.listing(f[1].addr, ' >> %t/bad.lua
+# RUN: printf '{ passes = {"hil", "nosuch"}, tokens = false })\n' >> %t/bad.lua
+# RUN: printf 'print("ok=" .. tostring(l.ok) .. " error=" .. l.error)\n' \
+# RUN:   >> %t/bad.lua
+
+# RUN: %sleigh-poc --file=%t/p --specs=%specs --project=%t/none.ddd \
+# RUN:   --script=%t/bad.lua 2>/dev/null \
+# RUN:   | FileCheck --check-prefix=NOPASS-SESSION %s
+
+# NOPASS-SESSION: ok=false error=no pass called "nosuch"

@@ -1,0 +1,102 @@
+# Operations that compute nothing.
+#
+# An identity is an operation whose result *is* one of its operands, and Sleigh
+# writes them out constantly: an index scale of 1 becomes a multiply by 1, and
+# an immediate Sleigh had to widen arrives as a sign extension that is then
+# multiplied by. None of it is a lie and none of it is worth a line in a
+# listing, so `identities` rewrites each one to a copy of the operand that
+# survives -- and `dce`, which follows it, collects whatever that strands.
+#
+# What makes this more than a table of opcode pairs is the width. `x & ~0` is
+# an identity; `x & 0xffffff` is not, though both are a mask with a constant;
+# and `x & 0xffffffff` is one at 32 bits and would be a truncation at 64. Every
+# rule checks the constant against the width of the operand it would be an
+# identity for, and the cases that must *not* be rewritten are here so that the
+# table cannot quietly become "remove any AND with a constant".
+#
+# Each case runs twice where it matters: once without the pass, to show the
+# shape is really in the lifted p-code, and once with it. A pass that has
+# stopped firing and a pass that is looking at the wrong input produce the same
+# silence otherwise.
+#
+#   mov eax, dword ptr [rdi + rax*1]   -- an index scale of 1
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=8b0407 \
+# RUN:   --passes=const-prop,print-ssa | FileCheck --check-prefix=MULT-BEFORE %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=8b0407 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=MULT %s
+# No --passes: the declared pipeline, which is where this has to hold.
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=8b0407 \
+# RUN:   | FileCheck --check-prefix=MULT-HIL %s
+
+# MULT-BEFORE: = INT_MULT RAX#in 0x1
+# MULT-NOT: INT_MULT
+# MULT: = INT_ADD RDI#in
+
+# Which is the whole of what a person sees: no scale, no temporary.
+# MULT-HIL: [arg0 + RAX]
+# MULT-HIL-NOT: * 0x1
+
+#
+#   imul eax, eax, 0x1  -- the identity's constant is itself computed
+#
+# Sleigh widens both operands with INT_SEXT before multiplying, so the 1 is not
+# a constant operand until const-prop has folded the extension away. This is why
+# `identities` runs after const-prop rather than before it: a rule that looked
+# for `x * 1` in the lifted code would never find this one.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=6bc001 \
+# RUN:   --passes=print-ssa | FileCheck --check-prefix=IMUL-BEFORE %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=6bc001 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=IMUL %s
+
+# IMUL-BEFORE: = INT_MULT
+# IMUL-NOT: INT_MULT
+# IMUL: = INT_SEXT EAX#in
+
+#
+#   and eax, 0xffffffff   -- an identity at this width
+#   and eax, 0xffffff     -- and not one at the same width
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=25ffffffff \
+# RUN:   --passes=print-ssa | FileCheck --check-prefix=ONES32-BEFORE %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=25ffffffff \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=ONES32 %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=25ffffff00 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=ONES24 %s
+
+# ONES32-BEFORE: EAX#1 = INT_AND EAX#in 0xffffffff
+# ONES32: EAX#1 = COPY EAX#in
+# ONES24: EAX#1 = INT_AND EAX#in 0xffffff
+
+#
+#   and eax, eax        -- the surviving operand, either way round
+#   or  eax, eax
+#   xor eax, 0x0
+#   sub eax, 0x0
+#   shl eax, 0x0        -- by a shift amount that only becomes 0 after folding
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=21c0 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=AND-SELF %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=09c0 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=OR-SELF %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=83f000 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=XOR-ZERO %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=83e800 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=SUB-ZERO %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=c1e000 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=SHL-ZERO %s
+
+# AND-SELF: EAX#1 = COPY EAX#in
+# OR-SELF: EAX#1 = COPY EAX#in
+# XOR-ZERO: EAX#1 = COPY EAX#in
+# SUB-ZERO: EAX#1 = COPY EAX#in
+# SHL-ZERO: EAX#1 = COPY EAX#in
+
+#
+#   and eax, edx   -- an operation that computes something, left alone
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=21d0 \
+# RUN:   --passes=const-prop,identities,print-ssa | FileCheck --check-prefix=REAL %s
+
+# REAL: EAX#1 = INT_AND EAX#in EDX#in

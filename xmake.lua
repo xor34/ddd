@@ -119,13 +119,27 @@ target("sleigh_compile")
 target("sleigh_poc")
     set_kind("binary")
 
+    -- `add_files` does not recurse, so every source directory needs its own
+    -- glob -- a missing one is an undefined symbol at link time, not a warning.
     add_files(
-        "src/*.cc",
-        "src/*.cpp",
-        "src/lua/*.cpp",
+        "src/frontend/*.cc",
+        "src/frontend/*.cpp",
+        "src/base/*.cpp",
+        "src/pcode/*.cpp",
+        "src/image/*.cpp",
+        "src/decode/*.cpp",
+        "src/extract/*.cpp",
+        "src/extract/extractors/*.cpp",
+        "src/ir/*.cpp",
+        "src/render/*.cpp",
         "src/passes/*.cpp",
-        "src/extractors/*.cpp"
+        "src/app/*.cpp",
+        "src/lua/*.cpp"
     )
+
+    -- Includes name the layer they come from (`ir/ssa.h`), so the directory a
+    -- header lives in is visible at every use site.
+    add_includedirs("src")
 
     add_deps("sla")
     add_packages("abseil", "lua")

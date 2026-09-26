@@ -20,8 +20,8 @@
 //
 // A script is not registered in the pass registry -- it is named by path at
 // the point of use, so there is nothing to install and nothing to rebuild.
-#include "../pass.h"
-#include "../script.h"
+#include "passes/pass.h"
+#include "base/script.h"
 
 #include <iomanip>
 #include <ostream>

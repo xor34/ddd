@@ -7,8 +7,8 @@
 // the *end of the matching predecessor*, not at the top of the block holding
 // the phi. The transform callback captures the function, so it can look at
 // its successors' phis to add those -- the engine itself stays oblivious.
-#include "../dataflow.h"
-#include "../pass.h"
+#include "ir/dataflow.h"
+#include "passes/pass.h"
 
 #include <algorithm>
 #include <set>

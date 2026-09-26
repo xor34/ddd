@@ -1,0 +1,87 @@
+# One machine read, one LOAD.
+#
+# Sleigh's p-code is functional and has no common subexpression elimination, so
+# the operand of an instruction that both reads and writes memory is written out
+# again for every flag the instruction defines:
+#
+#   add dword ptr [rdi], eax       6 loads      0x01 0x07
+#   inc dword ptr [rdi]            5 loads      0xff 0x07
+#   and dword ptr [rdi], eax       4 loads      0x21 0x07
+#   xchg eax, [rdi]                1 load       0x87 0x07
+#   mov eax, [rdi]                 1 load       0x8b 0x07
+#   lea eax, [rdi + 4]             0 loads      0x8d 0x47 0x04
+#
+# The count tracks the flags exactly, which is what makes them one read: every
+# one of those loads names the *same SSA value* as its address, so nothing could
+# have changed it in between. The forms that set no flags are already right, and
+# are here so that the fix cannot become "delete loads until it looks calm".
+#
+#   add dword ptr [rdi], eax
+#
+# One load, and the flags that survive it read the value that was stored: SF is
+# the sign of the sum, not the sign of what was in memory before the addition.
+# The reloads Sleigh emits after the store are not a second access -- one
+# instruction, one access to one address -- and this is the check that says so.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=0107 \
+# RUN:   --passes=mem-reads,print-ssa | FileCheck --check-prefix=ADD %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=0107 \
+# RUN:   --passes=stack-vars,mem-reads,dce,name-vars,types,hil \
+# RUN:   | FileCheck --check-prefix=ADD-HIL %s
+
+# ADD: = LOAD ram RDI#in
+# ADD-NOT: = LOAD ram RDI#in
+# ADD: unique:0xd400:4#3 = INT_ADD unique:0xd400:4#0 EAX#in
+# ADD-NEXT: STORE ram RDI#in unique:0xd400:4#3
+# ADD-NEXT: SF#0 = INT_SLESS unique:0xd400:4#3 0x0
+
+# The whole instruction, read back: one statement naming the slot once.
+# ADD-HIL: [arg0] = [arg0].4 + EAX
+
+#
+#   inc dword ptr [rdi]
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=ff07 \
+# RUN:   --passes=mem-reads,print-ssa | FileCheck --check-prefix=INC %s
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=ff07 \
+# RUN:   --passes=stack-vars,mem-reads,dce,name-vars,types,hil \
+# RUN:   | FileCheck --check-prefix=INC-HIL %s
+
+# INC: = LOAD ram RDI#in
+# INC-NOT: = LOAD ram RDI#in
+# INC-HIL: [arg0] = [arg0].4 + 0x1
+
+#
+#   and dword ptr [rdi], eax
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=2107 \
+# RUN:   --passes=mem-reads,print-ssa | FileCheck --check-prefix=AND %s
+
+# AND: = LOAD ram RDI#in
+# AND-NOT: = LOAD ram RDI#in
+
+#
+#   xchg eax, [rdi]  -- one read to begin with
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=8707 \
+# RUN:   --passes=mem-reads,print-ssa | FileCheck --check-prefix=XCHG %s
+
+# XCHG: = LOAD ram RDI#in
+# XCHG-NOT: = LOAD ram RDI#in
+
+#
+#   mov eax, [rdi]  -- and the one read is still one
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=8b07 \
+# RUN:   --passes=mem-reads,print-ssa | FileCheck --check-prefix=MOV %s
+
+# MOV: = LOAD ram RDI#in
+# MOV-NOT: = LOAD ram RDI#in
+
+#
+#   lea eax, [rdi + 4]  -- reads nothing, and stays that way
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=8d4704 \
+# RUN:   --passes=mem-reads,print-ssa | FileCheck --check-prefix=LEA %s
+
+# LEA-NOT: LOAD

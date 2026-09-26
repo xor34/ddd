@@ -28,8 +28,12 @@
 # which of them is the pushed return address.
 # CHECK-DAG: ; frame:{{.*}}retaddr[8]
 
-# a * b + 7, in one expression.
-# CHECK: trunc.4(sx.8(var_{{[0-9a-f_]+}}) * sx.8(var_{{[0-9a-f_]+}})) + 0x7
+# a * b + 7, in one expression -- the two arguments under the names the
+# convention gives them, and the product as a product: Sleigh widens both
+# operands to multiply them and cuts the result back down, which is three ways
+# of writing `a * b`. The result is an `int`, so it is returned as one rather
+# than as the 64-bit register the ABI happens to put it in.
+# CHECK: return arg0 * arg1 + 0x7
 
 # Only the one function was swept, so nothing after it shows up.
 # CHECK-NOT: unreachable

@@ -8,8 +8,14 @@
 // it were put there by the caller (arg_8). That is the usual convention for a
 // downward-growing stack, which is every architecture this ships a calling
 // convention for.
-#include "../pass.h"
-#include "../sparse.h"
+//
+// A slot's offset says where it is, which is not always what it is. Two kinds
+// are named by something better than their address: the return address a call
+// pushed, which the convention places, and the home of a parameter, which the
+// convention passed in a register. Both are recognised by what was stored
+// there -- a live-in value, so nothing in the function computed it.
+#include "passes/pass.h"
+#include "ir/sparse.h"
 
 #include <map>
 #include <ostream>
@@ -130,10 +136,18 @@ SparseAnalysis<StackValue> build_analysis(const Varnode &stack_pointer) {
 // is whatever the caller left there. On a push-style architecture one of
 // those slots is not an argument at all -- it is the return address the call
 // instruction pushed, and the convention is the only thing that knows.
-std::string slot_name(int64_t offset, const CallingConvention *abi) {
+std::string slot_name(int64_t offset, const CallingConvention *abi,
+                      const std::map<int64_t, std::string> &parameters) {
   if (abi != nullptr && abi->return_address_on_stack &&
       offset == abi->return_address_offset)
     return "retaddr";
+
+  // A slot that holds a parameter is the parameter, and saying `arg0` where
+  // the caller passed one is saying where the value came from. This outranks
+  // the offset, which is only a location.
+  const auto parameter = parameters.find(offset);
+  if (parameter != parameters.end())
+    return parameter->second;
 
   std::ostringstream os;
   if (offset < 0) {
@@ -179,6 +193,14 @@ public:
     std::map<int64_t, std::string> saved;
     find_saved_registers(fn, ctx, result, saved);
 
+    // A slot holding the incoming value of an argument register. This is the
+    // same recognition as `saved` above and the opposite conclusion: what the
+    // callee is *given* is a variable of the program, so the slot is named
+    // after it rather than hidden.
+    std::map<int64_t, std::string> parameters;
+    std::set<OpId> spills;
+    find_parameters(fn, ctx, result, parameters, spills);
+
     fn.for_each_op([&](SsaOp &op) {
       // LOAD: out = *ins[1]. STORE: *ins[1] = ins[2]. ins[0] is the space id.
       const bool load = op.opc == Op::LOAD;
@@ -200,26 +222,35 @@ public:
       auto saved_slot = saved.find(address.value);
       if (saved_slot != saved.end()) {
         ctx.annotations->mark_plumbing(op);
-        ctx.annotations->set_label(*op.ins[1].value, "&" + saved_slot->second);
+        ctx.annotations->set_label(*op.ins[1].value, "&" + saved_slot->second,
+                                   AddressKind::SavedRegister);
         return;
       }
+
+      // Putting a parameter in its home. The slot is the parameter -- the
+      // frame comment says so by name -- and the value arriving is what the
+      // name means, so the store is not a statement of the program: a listing
+      // that shows it reads `arg0 = arg0`, which is the same fact twice. The
+      // accesses that *read* the slot still show, as the slot.
+      if (spills.count(op.id) != 0) ctx.annotations->mark_plumbing(op);
 
       unsigned width = load ? (op.out != nullptr ? op.out->storage.size : 0)
                             : (op.ins.size() > 2 ? op.ins[2].raw.size : 0);
       unsigned &recorded = slots[address.value];
       recorded = std::max(recorded, width);
 
-      const std::string name = slot_name(address.value, ctx.abi());
+      const std::string name = slot_name(address.value, ctx.abi(), parameters);
       // Label the address only when it is a computed pointer. At offset 0 the
       // address *is* the stack pointer, and calling that "&arg_0" would throw
       // away the more useful name it already has.
       if (op.ins[1].value->storage != stack_pointer)
-        ctx.annotations->set_label(*op.ins[1].value, "&" + name);
+        ctx.annotations->set_label(*op.ins[1].value, "&" + name,
+                                   AddressKind::FrameSlot);
       ctx.annotations->comment(op, (load ? "load " : "store ") + name + " [" +
                                        frame_expression(address.value) + "]");
     });
 
-    annotate(fn, ctx, slots, saved);
+    annotate(fn, ctx, slots, saved, parameters);
     slots_ = static_cast<int>(slots.size());
   }
 
@@ -280,6 +311,88 @@ private:
     });
   }
 
+  // A slot that holds a parameter, named after the parameter.
+  //
+  //     mov [rbp-0x1c], edi
+  //
+  // is not the program storing anything: it is the convention putting the
+  // first argument where the function will keep it. Nothing else in the
+  // listing knows that, so the slot reads `var_1c` and every use of the first
+  // parameter reads `var_1c`, which is a name that says only where the
+  // variable lives.
+  //
+  // Three things have to hold at once, and each rules out a name that would
+  // be a lie. That the stored value is a live-in -- one that existed before
+  // the function did -- is what makes the slot a parameter rather than a
+  // local. That the store is in the entry block is what makes it the
+  // parameter's *home*: a store of the same live-in further down is a copy of
+  // the parameter into something else, which is a statement of the program
+  // (`var_14 = arg0`) and is left to say so. And that the slot is written
+  // once is what stops the name outliving the value it names -- a slot the
+  // function writes again holds the parameter only until it does not.
+  static void find_parameters(SsaFunction &fn, PassContext &ctx,
+                              const SparseResult<StackValue> &result,
+                              std::map<int64_t, std::string> &parameters,
+                              std::set<OpId> &spills) {
+    if (ctx.abi() == nullptr || ctx.translator() == nullptr) return;
+    if (!fn.cfg().entry) return;
+
+    // Where each argument register lives, keyed by address rather than by the
+    // storage itself: the convention names the whole register -- RDI, eight
+    // bytes -- and the function reads the low half of it, because a 32-bit
+    // parameter is four bytes and arrives in EDI. Both are the same incoming
+    // argument, and matching them is the same rule `signatures.lua` applies
+    // when it looks up a prototype's parameter.
+    std::map<Addr, int> arriving;
+    const std::vector<std::string> &arguments = ctx.abi()->arguments;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+      const Varnode storage =
+          register_storage(*ctx.translator(), *ctx.spaces(), arguments[i]);
+      if (storage.space != kNoSpace) arriving[address_of(storage)] = static_cast<int>(i);
+    }
+    if (arriving.empty()) return;
+
+    // How many times the function writes each slot, so that a slot written
+    // more than once is left out below. Counting all of them rather than only
+    // the stores of a live-in is the point: a slot that starts as a parameter
+    // and is later assigned to is a local whose first value came from the
+    // caller.
+    std::map<int64_t, int> writes;
+    fn.for_each_op([&](const SsaOp &op) {
+      if (op.opc != Op::STORE || op.ins.size() < 2) return;
+      if (!op.ins[1].is_tracked()) return;
+      const StackValue &address = result[*op.ins[1].value];
+      if (address.state == StackValue::Frame) ++writes[address.value];
+    });
+
+    const BlockId entry = *fn.cfg().entry;
+    for (const SsaOp *op : fn[entry].ops) {
+      if (op->opc != Op::STORE || op->ins.size() < 3) continue;
+      if (!op->ins[1].is_tracked() || !op->ins[2].is_tracked()) continue;
+
+      const StackValue &address = result[*op->ins[1].value];
+      if (address.state != StackValue::Frame) continue;
+      if (writes[address.value] != 1) continue;
+
+      const SsaValue *stored = original(op->ins[2].value);
+      if (stored == nullptr || !stored->is_live_in()) continue;
+
+      const auto arrived = arriving.find(address_of(stored->storage));
+      if (arrived == arriving.end()) continue;
+
+      // The convention's name for the parameter, unless something better
+      // already knows. A prototype the person wrote is applied by
+      // `signatures`, which runs before this pass for exactly this reason: it
+      // names the value that arrived, so the slot it lands in reads under the
+      // name the person used for it rather than under `arg<N>`.
+      const std::string &named = ctx.annotations->label(*stored);
+      parameters[address.value] = named.empty()
+                                      ? "arg" + std::to_string(arrived->second)
+                                      : named;
+      spills.insert(op->id);
+    }
+  }
+
   // Through COPY chains to the value that was really stored. `push rbx`
   // lowers to `t = RBX; [rsp] = t`, so the operand of the store is a
   // temporary and the live-in is one step behind it.
@@ -300,7 +413,8 @@ private:
   // this pass to describe itself.
   void annotate(const SsaFunction &fn, PassContext &ctx,
                 const std::map<int64_t, unsigned> &slots,
-                const std::map<int64_t, std::string> &saved) {
+                const std::map<int64_t, std::string> &saved,
+                const std::map<int64_t, std::string> &parameters) {
     if (!fn.cfg().entry)
       return;
 
@@ -317,8 +431,8 @@ private:
     std::ostringstream layout;
     layout << "frame:";
     for (const auto &slot : slots) {
-      layout << " " << slot_name(slot.first, ctx.abi()) << "[" << slot.second
-             << "]";
+      layout << " " << slot_name(slot.first, ctx.abi(), parameters) << "["
+             << slot.second << "]";
     }
     ctx.annotations->comment_block(*fn.cfg().entry, layout.str());
   }

@@ -16,7 +16,7 @@
 // The self-reference rule matters as much: `x2 = phi(x1, x2)` is the shape a
 // loop-carried value takes when the loop body never changes it, and ignoring
 // the operand that refers back to the phi itself makes it trivial.
-#include "../pass.h"
+#include "passes/pass.h"
 
 #include <string>
 #include <vector>

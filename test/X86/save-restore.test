@@ -1,0 +1,57 @@
+# A callee-saved register's trip through the stack is bookkeeping, and the
+# listing says so in one word rather than showing the round trip: `; saves:
+# RBX`. That summary is only honest if the lines it stands in for are not read
+# by anything that *is* printed -- and until this rule existed they were.
+#
+# `push rbx ; pop rbx ; ret` printed one statement, `RBX = saved_RBX`, naming a
+# variable the listing never defines. The push and the slot address it wrote
+# through were elided as bookkeeping, the pop folded into the copy that lands
+# the value in RBX, and what survived named the slot the dropped pair filled.
+#
+#   push rbx ; pop rbx ; ret
+#
+# The pair goes as a pair: with nothing but the pair reading what the restore
+# produced, all of it goes, and the summary is the whole story.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=535bc3 \
+# RUN:   --passes=stack-vars,hil | FileCheck --check-prefix=ELIDED %s
+
+# ELIDED: ; saves: RBX
+# ELIDED: ; frame: retaddr[8]
+# No assignment at all between the summary and the return.
+# ELIDED-NOT: =
+# ELIDED: return
+
+#
+#   push rbx ; mov eax, 1 ; pop rbx ; ret
+#
+# The same, with the instruction the function is actually about left standing
+# -- and on the return line, because the value it puts in the result register
+# is the function's result. What the instruction did is still there; where it
+# is written is where a reader wants it.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=53b8010000005bc3 \
+# RUN:   --passes=stack-vars,hil | FileCheck --check-prefix=KEPT %s
+
+# KEPT: ; saves: RBX
+# KEPT-NOT: saved_RBX
+# KEPT: return 0x1
+
+#
+#   push rbx ; pop rbx ; mov [rdi], rbx ; ret
+#
+# The other side of the rule. Something outside the pair reads the register the
+# restore produced, so the restore is work the program does and none of the
+# group is elided -- not the copy, not the load, and not the address, because
+# `&saved_RBX = RSP - 0x8` is the line that defines the name the two of them are
+# written with. A listing may show a slot, or summarise it, but never half of
+# each.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=535b48891fc3 \
+# RUN:   --passes=stack-vars,hil | FileCheck --check-prefix=SHOWN %s
+
+# SHOWN: ; saves: RBX
+# SHOWN: &saved_RBX#1 = RSP#in - 0x8
+# SHOWN: saved_RBX#1 = RBX#in
+# SHOWN: RBX#1 = saved_RBX#1
+# SHOWN: [RDI] = RBX#1

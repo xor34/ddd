@@ -1,0 +1,57 @@
+# The three renderers are three levels of one function, and this is the pair
+# that has to agree: `asm` states the machine, `hil` states what was worked out
+# from it.
+#
+#   push rbp ; pop rbp ; ret
+#
+# Nothing is elided in the machine listing. A callee-saved register's trip
+# through the stack is bookkeeping to the folded listing and it still says so --
+# `; saves: RBP` -- but the instructions that do it are the ground truth the
+# summary is checked against, so both halves are here, in order, with the note
+# the analyses put on the return's load underneath the return.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=555dc3 \
+# RUN:   --passes=stack-vars,asm | FileCheck --check-prefix=ASM %s
+
+# ASM: ; saves: RBP
+# ASM: ; frame: retaddr[8]
+# ASM: 0x0  PUSH RBP
+# ASM: 0x1  POP RBP
+# ASM: 0x2  RET
+# ASM: ; load retaddr [sp]
+
+#
+#   push rbp ; pop rbp ; ret, in the folded listing
+#
+# The same two instructions, gone -- and the summary that stands in for them is
+# still there, which is the whole contract. Checked as a NOT so that the pair is
+# pinned in both direction: what `hil` omits, `asm` shows.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=555dc3 \
+# RUN:   --passes=stack-vars,hil | FileCheck --check-prefix=HIL %s
+
+# HIL: ; saves: RBP
+# HIL-NOT: PUSH
+# HIL-NOT: POP
+# HIL: 0x2  return
+
+#
+#   push rbp ; mov rbp, rsp ; mov [rbp - 8], rdi ; pop rbp ; ret
+#
+# A note belongs to the instruction it was made about, and in the machine
+# listing that is the instruction itself: `; store arg0 [sp-0x10]` sits under
+# the `MOV` that stores, and the frame setup around it is neither hidden nor
+# moved. The value stored is RDI, which the convention passes the first
+# argument in, so the note names the slot for the parameter rather than for
+# where it sits.
+#
+# RUN: %sleigh-poc --sla=%specs/x86-64.sla --base=0 --bytes=554889e548897df85dc3 \
+# RUN:   --passes=stack-vars,name-vars,asm | FileCheck --check-prefix=NOTE %s
+
+# NOTE: ; frame: arg0[8] retaddr[8]
+# NOTE: 0x0  PUSH RBP
+# NOTE: 0x1  MOV RBP,RSP
+# NOTE: 0x4  MOV qword ptr [RBP + -0x8],RDI
+# NOTE: ; store arg0 [sp-0x10]
+# NOTE: 0x8  POP RBP
+# NOTE: 0x9  RET

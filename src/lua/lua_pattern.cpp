@@ -11,8 +11,8 @@
 //
 // Slots are one-based here. Writing the same slot twice is how a pattern says
 // "the same value in both places"; a slot used once matches anything.
-#include "../pattern.h"
-#include "lua_util.h"
+#include "ir/pattern.h"
+#include "lua/lua_util.h"
 
 #include <new>
 

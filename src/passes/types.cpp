@@ -18,8 +18,8 @@
 // pointee's fields. Those need a memory model this does not have. It answers
 // "is this a signed integer, an unsigned one, a boolean, or a pointer to
 // something N bytes wide", which is most of what makes a listing readable.
-#include "../pass.h"
-#include "../project.h"
+#include "passes/pass.h"
+#include "app/project.h"
 
 #include <map>
 #include <ostream>
@@ -241,9 +241,9 @@ private:
 
     auto slot_of = [&](const SsaOperand &address) -> const std::string * {
       if (!address.is_tracked()) return nullptr;
-      const std::string &label = ctx.annotations->label(*address.value);
-      if (!is_slot_label(label)) return nullptr;
-      return &label;
+      if (!names_slot(ctx.annotations->address_kind(*address.value)))
+        return nullptr;
+      return &ctx.annotations->label(*address.value);
     };
 
     auto merge = [&](const std::string &slot, const Evidence &from) {
@@ -279,8 +279,12 @@ private:
       const SsaValue &value = fn.value(ValueId{i});
       if (!ctx.annotations->has_display_name(value)) continue;
 
+      // A slot's evidence was gathered under its label, which the display
+      // name may have come from; `shown` is the name without the '&' the
+      // address's spelling carries.
+      const bool slot = names_slot(ctx.annotations->address_kind(value));
       std::string shown = ctx.annotations->display_name(value);
-      if (is_slot_label(shown)) shown.erase(0, 1);
+      if (slot) shown.erase(0, 1);
 
       // The slot's type is the type of what is stored in it, which the
       // pointer evidence on its address already records.
@@ -289,7 +293,7 @@ private:
       Evidence effective = evidence;
 
       // For a slot, the type wanted is that of its *contents*, gathered above.
-      if (is_slot_label(ctx.annotations->display_name(value))) {
+      if (slot) {
         auto contents = slots_.find(shown);
         effective = contents != slots_.end() ? contents->second : Evidence{};
         size = evidence.pointee != 0 ? evidence.pointee : size;

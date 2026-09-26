@@ -20,8 +20,13 @@ Lout:
 // CHECK: 0x1004 sub x1, x1, x1
 // CHECK: INT_SUB x1#in x1#in  ; always 0
 
+// `and x2, x2, x2` is the one shape here that computes nothing: x & x is x, so
+// there is no sentence worth attaching to it. The `identities` pass removes it,
+// before this table is ever consulted, which is why there is no rule for it --
+// run alone, as here, the AND is a plain AND with nothing to say.
 // CHECK: 0x1008 and x2, x2, x2
-// CHECK: x2#1 = INT_AND x2#in x2#in  ; no-op (x & x)
+// CHECK: x2#1 = INT_AND x2#in x2#in
+// CHECK-NOT: no-op
 
 // The shift amount is read out of the match and folded into the comment.
 // CHECK: 0x100c lsl x3, x3, #0x3

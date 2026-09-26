@@ -13,7 +13,7 @@
 
 # The block comment the script emitted, next to the one stack-vars emitted.
 # CHECK: block 0 (entry)
-# CHECK-DAG: ; frame: var_18[8]
+# CHECK-DAG: ; frame: arg0[8]
 # CHECK-DAG: ; seen by python on AARCH64
 
 # The script labelled the multiply's result, and print-ssa renders it exactly

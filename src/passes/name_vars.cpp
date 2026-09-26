@@ -12,9 +12,9 @@
 // honest way to know that is to ask.
 //
 // Run it between `calling-conv` and `hil`.
-#include "../abi.h"
-#include "../hil.h"
-#include "../pass.h"
+#include "decode/abi.h"
+#include "render/hil.h"
+#include "passes/pass.h"
 
 #include <algorithm>
 #include <cctype>
@@ -65,6 +65,7 @@ public:
     seen_.clear();
     candidates_.clear();
     bases_.clear();
+    places_.clear();
     return_address_ = Varnode{};
     entry_ = fn.cfg().entry;
 
@@ -98,6 +99,20 @@ public:
   }
 
 private:
+  // One value that survived folding, and what it would be called.
+  struct Candidate {
+    const SsaValue *value = nullptr;
+    std::string name;    // what it would be called
+    std::string storage; // where it lives, for the note
+    bool from_storage = false;
+    bool machine_flag = false; // IF, DF: state, not a variable
+
+    // Where in the machine it is, width dropped: two values agree here when
+    // they share a register, however differently the spec spells it.
+    Addr place;
+    bool in_a_register = false;
+  };
+
   void walk(ExprRef expr, PassContext &ctx) {
     if (expr == nullptr) return;
 
@@ -113,7 +128,7 @@ private:
     for (size_t i = 0; i < ctx.abi()->arguments.size(); ++i) {
       Varnode storage = register_storage(*ctx.translator(), *ctx.spaces(),
                                          ctx.abi()->arguments[i]);
-      if (storage.space != kNoSpace) arguments_[storage] = static_cast<int>(i);
+      if (storage.space != kNoSpace) arguments_[address_of(storage)] = static_cast<int>(i);
     }
 
     if (!ctx.abi()->return_address_register.empty())
@@ -152,9 +167,29 @@ private:
                              !value.is_live_in() &&
                              candidate.name == ctx.base_name_of(value);
     candidate.storage = ctx.base_name_of(value);
+    candidate.place = address_of(value.storage);
+    candidate.in_a_register =
+        ctx.spaces() != nullptr &&
+        ctx.spaces()->is_kind(value.storage.space, SpaceKind::Register);
 
-    ++bases_[candidate.name];
+    if (candidate.from_storage) {
+      ++bases_[candidate.name];
+      // And by where it sits, for a register: see assign().
+      if (candidate.in_a_register) ++places_[candidate.place];
+    }
     candidates_.push_back(std::move(candidate));
+  }
+
+  // Whether another value of this function would answer to the same name, or
+  // merely take turns in the same register. Either one makes a register name a
+  // poor name: see assign().
+  bool shares_its_place(const Candidate &candidate) const {
+    auto by_name = bases_.find(candidate.name);
+    if (by_name != bases_.end() && by_name->second > 1) return true;
+
+    if (!candidate.in_a_register) return false;
+    auto by_place = places_.find(candidate.place);
+    return by_place != places_.end() && by_place->second > 1;
   }
 
   // Second pass, now that the collisions are known.
@@ -166,6 +201,12 @@ private:
   // between them reads as though the register were merging with itself. Those
   // get plain numbered names, and a note at the top of the function says where
   // each one lives.
+  //
+  // "That register" is the whole register, whatever width the code names it
+  // at. Sleigh spells a 32-bit answer `EAX` and the loop counter that follows
+  // it in the same register `RAX`, and those are two spellings of one place --
+  // so the counting is by name and by place, and either kind of collision is
+  // enough to make the register name a bad one.
   int assign(PassContext &ctx) {
     int named = 0;
     int next = 0;
@@ -180,15 +221,18 @@ private:
         continue;
       }
 
-      if (candidate.from_storage && bases_[candidate.name] > 1) {
+      if (candidate.from_storage && shares_its_place(candidate)) {
         name = "v" + std::to_string(++next);
         notes.push_back(name + " in " + candidate.storage);
       } else {
         // `&var_1c` names a stack slot's address. The same slot gets its
         // address recomputed at every access, and those are all the one
         // variable -- giving them separate names would invent variables the
-        // program does not have.
-        if (!is_slot_label(name)) name = unique(name);
+        // program does not have. That the label names an address, and which
+        // slot, is what address_kind() records; here only the spelling of the
+        // name follows from it.
+        if (ctx.annotations->address_kind(*candidate.value) == AddressKind::None)
+          name = unique(name);
       }
 
       ctx.annotations->set_display_name(*candidate.value, name);
@@ -233,7 +277,14 @@ private:
 
       // A parameter is worth calling one; anything else read before it is
       // written keeps its register name, which is already the whole story.
-      auto argument = arguments_.find(value.storage);
+      //
+      // Found by the space and offset the register sits at, not by the
+      // register itself. The convention names RDI and the function reads EDI,
+      // because a 32-bit parameter is four bytes arriving in an eight-byte
+      // register -- and to SSA those are two storages with one address. The
+      // same rule stack_vars uses to recognise the slot a parameter was
+      // spilled to, and the same one signatures.lua uses.
+      auto argument = arguments_.find(address_of(value.storage));
       if (argument != arguments_.end()) return "arg" + std::to_string(argument->second);
       return ctx.base_name_of(value);
     }
@@ -271,22 +322,16 @@ private:
     return count == 1 ? base : base + "_" + std::to_string(count);
   }
 
-  struct Candidate {
-    const SsaValue *value = nullptr;
-    std::string name;    // what it would be called
-    std::string storage; // where it lives, for the note
-    bool from_storage = false;
-    bool machine_flag = false; // IF, DF: state, not a variable
-  };
-
   int named_ = 0;
   std::set<Varnode> flags_;
-  std::map<Varnode, int> arguments_;
+  // Keyed by where the register is, not by the register: see choose().
+  std::map<Addr, int> arguments_;
   Varnode return_address_;
   std::map<std::string, int> counts_;
   std::set<ValueId> seen_;
   std::vector<Candidate> candidates_;
   std::map<std::string, int> bases_;
+  std::map<Addr, int> places_;
   std::optional<BlockId> entry_;
 };
 

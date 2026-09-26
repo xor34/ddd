@@ -9,10 +9,10 @@
 //
 //   local reaching = ddd.reaching(fn, ctx)
 //   local value = reaching:before(op, "RDI")
-#include "../pass.h"
-#include "../reaching.h"
-#include "../ssa.h"
-#include "lua_util.h"
+#include "passes/pass.h"
+#include "ir/reaching.h"
+#include "ir/ssa.h"
+#include "lua/lua_util.h"
 
 #include <new>
 

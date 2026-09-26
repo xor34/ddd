@@ -6,11 +6,15 @@
 // RUN:   | FileCheck %s
 
   sub  sp, sp, #0x20
-  str  x0, [sp, #8]
+  str  x9, [sp, #8]
   ldr  x1, [sp, #8]
   add  sp, sp, #0x20
   ret
 
+// x9 rather than x0: nothing else knows what it is. A slot holding the value
+// an argument register arrived with is named after the parameter instead, which
+// is `parameters.s`; the offset is what is left when nothing better is known.
+//
 // The frame layout is summarised on the entry block: one 8-byte local.
 // CHECK: block 0 (entry)
 // CHECK: ; frame: var_18[8]
@@ -21,9 +25,9 @@
 // CHECK: sp-0x20#1 = INT_SUB sp#in 0x20
 
 // The computed address becomes &var_18, and the access says which slot it is.
-// CHECK: 0x1004 str x0, [sp, #0x8]
+// CHECK: 0x1004 str x9, [sp, #0x8]
 // CHECK: &var_18#0 = INT_ADD sp-0x20#1 0x8
-// CHECK: STORE ram &var_18#0 x0#in  ; store var_18 [sp-0x18]
+// CHECK: STORE ram &var_18#0 x9#in  ; store var_18 [sp-0x18]
 
 // The load is annotated with the slot it reads. Its *result* is deliberately
 // not renamed after the slot: the high-level listing writes the load as the

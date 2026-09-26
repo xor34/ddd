@@ -12,8 +12,8 @@
 // interface can match `var_c` here against `var_c` there without guessing at
 // word boundaries -- which would be wrong anyway, since `RAX` appears inside
 // `RAX_2`.
-#include "../session.h"
-#include "lua_util.h"
+#include "app/session.h"
+#include "lua/lua_util.h"
 
 #include <string>
 #include <vector>
@@ -659,11 +659,11 @@ int session_threads(lua_State *L) {
 
 // session.regions() -- the stretches of the image, what reads them, and how.
 int session_regions(lua_State *L) {
-  const std::vector<Region> &regions = session(L)->regions();
+  const std::vector<ImageRange> &regions = session(L)->regions();
 
   lua_createtable(L, static_cast<int>(regions.size()), 0);
   for (size_t i = 0; i < regions.size(); ++i) {
-    const Region &region = regions[i];
+    const ImageRange &region = regions[i];
 
     lua_createtable(L, 0, 6);
     set_number(L, "begin", static_cast<lua_Integer>(region.begin));

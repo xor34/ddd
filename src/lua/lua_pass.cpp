@@ -5,9 +5,9 @@
 // --list_passes prints. Nothing downstream can tell the difference, which is
 // the point: the split between the two languages is an implementation detail
 // of this tool, not a category the user has to think about.
-#include "../pass.h"
-#include "lua_env.h"
-#include "lua_util.h"
+#include "passes/pass.h"
+#include "lua/lua_env.h"
+#include "lua/lua_util.h"
 
 #include <string>
 #include <vector>
@@ -161,11 +161,24 @@ int default_passes(lua_State *L) {
   return 1;
 }
 
+// Whether a pass states the listing rather than annotating it, asked of the one
+// place that decides (passes/pass.cpp): `ending_in` swaps one renderer for
+// another, and a name it failed to strip would leave a pipeline stating the
+// function twice.
+int terminal_pass(lua_State *L) {
+  size_t length = 0;
+  const char *name = luaL_checklstring(L, 1, &length);
+
+  lua_pushboolean(L, is_terminal_pass(std::string(name, length)));
+  return 1;
+}
+
 const luaL_Reg kFunctions[] = {{"register_pass", register_pass},
                                {"register_ui", register_ui},
                                {"passes", registered_passes},
                                {"uis", registered_uis},
                                {"default_passes", default_passes},
+                               {"is_terminal_pass", terminal_pass},
                                {nullptr, nullptr}};
 
 } // namespace

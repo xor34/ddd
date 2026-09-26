@@ -29,10 +29,14 @@ caller:
 // The two slots above the return address are the parameters, and the frame
 // says so by name.
 //
+// The sum is the function's whole result, so it is written where the result
+// goes rather than parked in EAX and named twice: the convention says EAX is
+// where a cdecl function returns, which is the line saying `return`.
+//
 // CHECK: frame: retaddr[4] arg_4[4] arg_8[4]
 // CHECK: parameters (cdecl-x86): the stack, from sp+0x4
 // CHECK: return address: pushed by the call, at the entry sp
-// CHECK: EAX = arg_4 + arg_8
+// CHECK: return arg_4 + arg_8
 
 // And at a call, what was pushed for it -- in the order the callee reads them,
 // with the call's own return-address push left out of the list.

@@ -14,9 +14,9 @@
 // function's last write to a preserved register has no uses inside the
 // function and is exactly what the function is for, so the calling convention
 // supplies those as roots. Without them this pass would delete the result.
-#include "../abi.h"
-#include "../pass.h"
-#include "../reaching.h"
+#include "decode/abi.h"
+#include "passes/pass.h"
+#include "ir/reaching.h"
 
 #include <set>
 #include <string>
@@ -33,7 +33,7 @@ public:
   }
 
   void run(SsaFunction &fn, PassContext &ctx) override {
-    const std::set<ValueId> roots = observable_values(fn, ctx);
+    const std::set<ValueId> roots = observable_values(fn, ctx.target);
     annotations_ = ctx.annotations;
     collect_machine_flags(ctx);
     no_abi_ = roots.empty();
@@ -65,8 +65,7 @@ private:
     if (op.opc != Op::LOAD || op.ins.size() < 2) return false;
     if (annotations_ == nullptr || !op.ins[1].is_tracked()) return false;
 
-    const std::string &label = annotations_->label(*op.ins[1].value);
-    return !label.empty() && label[0] == '&';
+    return names_slot(annotations_->address_kind(*op.ins[1].value));
   }
 
   // Writing machine state is doing something, not computing something.

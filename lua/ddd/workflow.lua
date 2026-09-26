@@ -242,12 +242,16 @@ end
 
 -- The same pipeline, rendered differently: everything that annotates, then one
 -- printer instead of another. This is how an interface offers the folded
--- listing and the raw SSA without either being a separate pipeline that would
--- then have to be kept in step with --passes.
+-- listing, the raw SSA and the annotated assembly without any of them being a
+-- separate pipeline that would then have to be kept in step with --passes.
+--
+-- Which passes those are is asked of the engine rather than listed here: a
+-- renderer added in C++ must not be one this function forgets to strip, or a
+-- pipeline would state the function twice.
 function M.ending_in(pipeline, printer)
   local out = {}
   for _, name in ipairs(pipeline or M.pipeline()) do
-    if name ~= "hil" and name ~= "print-ssa" then out[#out + 1] = name end
+    if not core.is_terminal_pass(name) then out[#out + 1] = name end
   end
   out[#out + 1] = printer
   return out

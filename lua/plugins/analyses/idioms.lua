@@ -8,6 +8,11 @@
 --
 -- Adding a rule means adding one entry to the table -- and, now that the table
 -- is Lua, without rebuilding anything.
+--
+-- What belongs here is a shape that *means* something. A shape that means
+-- nothing -- an operand written as an operation -- belongs in the `identities`
+-- pass, which rewrites it away rather than explaining it. The dividing line is
+-- whether the operation computes a constant.
 local ddd = require "ddd"
 local pat = ddd.pat
 
@@ -37,21 +42,11 @@ local rules = {
     pattern = pat.comm("INT_AND", pat.val(1), pat.imm(0)),
     says = "always 0",
   },
-  {
-    name = "identity-and",
-    pattern = pat.op("INT_AND", { pat.val(1), pat.val(1) }),
-    says = "no-op (x & x)",
-  },
-  {
-    name = "identity-or",
-    pattern = pat.op("INT_OR", { pat.val(1), pat.val(1) }),
-    says = "no-op (x | x)",
-  },
-  {
-    name = "identity-add",
-    pattern = pat.comm("INT_ADD", pat.val(1), pat.imm(0)),
-    says = "no-op (x + 0)",
-  },
+  -- There were three rules here -- `x & x`, `x | x`, `x + 0` -- saying "this is
+  -- a no-op". They are gone, because saying it is the weaker of the two things
+  -- that can be done about a no-op: the `identities` pass *rewrites* it, so
+  -- what reaches here is the operand itself and there is nothing left to
+  -- annotate. Every rule below computes something.
   {
     name = "always-equal",
     pattern = pat.op("INT_EQUAL", { pat.val(1), pat.val(1) }),
